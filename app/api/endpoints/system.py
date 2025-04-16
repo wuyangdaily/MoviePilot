@@ -5,7 +5,7 @@ import tempfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, Annotated
 
 import aiofiles
 import pillow_avif  # noqa 用于自动注册AVIF支持
@@ -28,6 +28,7 @@ from app.helper.message import MessageHelper, MessageQueueManager
 from app.helper.progress import ProgressHelper
 from app.helper.rule import RuleHelper
 from app.helper.sites import SitesHelper
+from app.helper.subscribe import SubscribeHelper
 from app.log import logger
 from app.monitor import Monitor
 from app.scheduler import Scheduler
@@ -141,7 +142,7 @@ def fetch_image(
 def proxy_img(
         imgurl: str,
         proxy: bool = False,
-        if_none_match: Optional[str] = Header(None),
+        if_none_match: Annotated[str | None, Header()] = None,
         _: schemas.TokenPayload = Depends(verify_resource_token)
 ) -> Response:
     """
@@ -158,7 +159,7 @@ def proxy_img(
 @router.get("/cache/image", summary="图片缓存")
 def cache_img(
         url: str,
-        if_none_match: Optional[str] = Header(None),
+        if_none_match: Annotated[str | None, Header()] = None,
         _: schemas.TokenPayload = Depends(verify_resource_token)
 ) -> Response:
     """
@@ -179,9 +180,10 @@ def get_global_setting():
         exclude={"SECRET_KEY", "RESOURCE_SECRET_KEY", "API_TOKEN", "TMDB_API_KEY", "TVDB_API_KEY", "FANART_API_KEY",
                  "COOKIECLOUD_KEY", "COOKIECLOUD_PASSWORD", "GITHUB_TOKEN", "REPO_GITHUB_TOKEN"}
     )
-    # 追加用户唯一ID
+    # 追加用户唯一ID和订阅分享管理权限
     info.update({
-        "USER_UNIQUE_ID": SystemUtils.generate_user_unique_id()
+        "USER_UNIQUE_ID": SubscribeHelper().get_user_uuid(),
+        "SUBSCRIBE_SHARE_MANAGE": SubscribeHelper().is_admin_user(),
     })
     return schemas.Response(success=True,
                             data=info)
@@ -281,6 +283,9 @@ def set_setting(key: str, value: Union[list, dict, bool, int, str] = None,
         success, message = settings.update_setting(key=key, value=value)
         return schemas.Response(success=success, message=message)
     elif key in {item.value for item in SystemConfigKey}:
+        if isinstance(value, list):
+            value = list(filter(None, value))
+            value = value if value else None
         SystemConfigOper().set(key, value)
         return schemas.Response(success=True)
     else:
@@ -288,7 +293,8 @@ def set_setting(key: str, value: Union[list, dict, bool, int, str] = None,
 
 
 @router.get("/message", summary="实时消息")
-async def get_message(request: Request, role: str = "system", _: schemas.TokenPayload = Depends(verify_resource_token)):
+async def get_message(request: Request, role: Optional[str] = "system",
+                      _: schemas.TokenPayload = Depends(verify_resource_token)):
     """
     实时获取系统消息，返回格式为SSE
     """
@@ -309,7 +315,7 @@ async def get_message(request: Request, role: str = "system", _: schemas.TokenPa
 
 
 @router.get("/logging", summary="实时日志")
-async def get_logging(request: Request, length: int = 50, logfile: str = "moviepilot.log",
+async def get_logging(request: Request, length: Optional[int] = 50, logfile: Optional[str] = "moviepilot.log",
                       _: schemas.TokenPayload = Depends(verify_resource_token)):
     """
     实时获取系统日志
@@ -381,7 +387,7 @@ def latest_version(_: schemas.TokenPayload = Depends(verify_token)):
 @router.get("/ruletest", summary="过滤规则测试", response_model=schemas.Response)
 def ruletest(title: str,
              rulegroup_name: str,
-             subtitle: str = None,
+             subtitle: Optional[str] = None,
              _: schemas.TokenPayload = Depends(verify_token)):
     """
     过滤规则测试，规则类型 1-订阅，2-洗版，3-搜索
@@ -500,7 +506,7 @@ def run_scheduler(jobid: str,
 
 @router.get("/runscheduler2", summary="运行服务（API_TOKEN）", response_model=schemas.Response)
 def run_scheduler2(jobid: str,
-                   _: str = Depends(verify_apitoken)):
+                   _: Annotated[str, Depends(verify_apitoken)]):
     """
     执行命令（API_TOKEN认证）
     """
