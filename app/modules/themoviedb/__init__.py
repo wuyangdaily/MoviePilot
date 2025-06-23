@@ -37,7 +37,7 @@ class TheMovieDbModule(_ModuleBase):
         self.cache = TmdbCache()
         self.tmdb = TmdbApi()
         self.category = CategoryHelper()
-        self.scraper = TmdbScraper(self.tmdb)
+        self.scraper = TmdbScraper()
 
     @staticmethod
     def get_name() -> str:
@@ -268,7 +268,7 @@ class TheMovieDbModule(_ModuleBase):
                             # 当前季第一季时间
                             first_date = episodes[0].get("air_date")
                             # 判断是不是日期格式
-                            if re.match(r"^\d{4}-\d{2}-\d{2}$", first_date):
+                            if first_date and re.match(r"^\d{4}-\d{2}-\d{2}$", first_date):
                                 season_years[season] = str(first_date).split("-")[0]
                     if season_years:
                         mediainfo.season_years = season_years
@@ -406,7 +406,8 @@ class TheMovieDbModule(_ModuleBase):
             return None
         return self.scraper.get_metadata_nfo(meta=meta, mediainfo=mediainfo, season=season, episode=episode)
 
-    def metadata_img(self, mediainfo: MediaInfo, season: Optional[int] = None, episode: Optional[int] = None) -> Optional[dict]:
+    def metadata_img(self, mediainfo: MediaInfo, season: Optional[int] = None,
+                     episode: Optional[int] = None) -> Optional[dict]:
         """
         获取图片名称和url
         :param mediainfo: 媒体信息
@@ -505,7 +506,6 @@ class TheMovieDbModule(_ModuleBase):
             episode_count=len(sea.get("episodes") or []),
             air_date=sea.get("episodes")[0].get("air_date") if sea.get("episodes") else None,
         ) for sea in group_seasons]
-
 
     def tmdb_episodes(self, tmdbid: int, season: int, episode_group: Optional[str] = None) -> List[schemas.TmdbEpisode]:
         """

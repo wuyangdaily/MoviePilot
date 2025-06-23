@@ -61,6 +61,10 @@ class EventType(Enum):
     MetadataScrape = "metadata.scrape"
     # 模块需要重载
     ModuleReload = "module.reload"
+    # 配置项更新
+    ConfigChanged = "config.updated"
+    # 消息交互动作
+    MessageAction = "message.action"
 
 
 # 同步链式事件
@@ -89,6 +93,8 @@ class ChainEventType(Enum):
     RecommendSource = "recommend.source"
     # 工作流执行
     WorkflowExecution = "workflow.execution"
+    # 存储操作选择
+    StorageOperSelection = "storage.operation"
 
 
 # 系统配置Key字典
@@ -139,6 +145,8 @@ class SystemConfigKey(Enum):
     UserInstalledPlugins = "UserInstalledPlugins"
     # 插件安装统计
     PluginInstallReport = "PluginInstallReport"
+    # 插件文件夹分组配置
+    PluginFolders = "PluginFolders"
     # 默认电影订阅规则
     DefaultMovieSubscribeConfig = "DefaultMovieSubscribeConfig"
     # 默认电视剧订阅规则
@@ -149,6 +157,10 @@ class SystemConfigKey(Enum):
     FollowSubscribers = "FollowSubscribers"
     # 通知发送时间
     NotificationSendTime = "NotificationSendTime"
+    # 通知消息格式模板
+    NotificationTemplates = "NotificationTemplates"
+    # 刮削开关设置
+    ScrapingSwitchs = "ScrapingSwitchs"
 
 
 # 处理进度Key字典
@@ -185,6 +197,21 @@ class NotificationType(Enum):
     Plugin = "插件"
     # 其它消息
     Other = "其它"
+
+
+class ContentType(str, Enum):
+    """
+    消息内容类型
+    操作状态的通知消息类型标识
+    """
+    # 订阅添加成功
+    SubscribeAdded = "subscribeAdded"
+    # 订阅完成
+    SubscribeComplete = "subscribeComplete"
+    # 入库成功
+    OrganizeSuccess = "organizeSuccess"
+    # 下载开始(添加下载任务成功)
+    DownloadAdded = "downloadAdded"
 
 
 # 消息渠道

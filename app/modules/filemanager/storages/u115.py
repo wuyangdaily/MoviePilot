@@ -1,11 +1,11 @@
 import base64
 import hashlib
-import json
+import io
 import secrets
 import threading
 import time
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import oss2
 import requests
@@ -50,9 +50,6 @@ class U115Pan(StorageBase, metaclass=Singleton):
 
     # 基础url
     base_url = "https://proapi.115.com"
-
-    # CID和路径缓存
-    _id_cache: Dict[str, str] = {}
 
     def __init__(self):
         super().__init__()
@@ -238,58 +235,6 @@ class U115Pan(StorageBase, metaclass=Singleton):
             return ret_data.get(result_key)
         return ret_data
 
-    def _path_to_id(self, path: str) -> str:
-        """
-        路径转FID（带缓存机制）
-        """
-        # 根目录
-        if path == "/":
-            return '0'
-        if len(path) > 1 and path.endswith("/"):
-            path = path[:-1]
-        # 检查缓存
-        if path in self._id_cache:
-            return self._id_cache[path]
-        # 逐级查找缓存
-        current_id = 0
-        parent_path = "/"
-        for p in Path(path).parents:
-            if str(p) in self._id_cache:
-                parent_path = str(p)
-                current_id = self._id_cache[parent_path]
-                break
-        # 计算相对路径
-        rel_path = Path(path).relative_to(parent_path)
-        for part in Path(rel_path).parts:
-            offset = 0
-            find_part = False
-            while True:
-                resp = self._request_api(
-                    "GET",
-                    "/open/ufile/files",
-                    "data",
-                    params={"cid": current_id, "limit": 1000, "offset": offset, "cur": True, "show_dir": 1}
-                )
-                if not resp:
-                    break
-                for item in resp:
-                    if item["fn"] == part:
-                        current_id = item["fid"]
-                        find_part = True
-                        break
-                if find_part:
-                    break
-                if len(resp) < 1000:
-                    break
-                offset += len(resp)
-            if not find_part:
-                raise FileNotFoundError(f"【115】{path} 不存在")
-        if not current_id:
-            raise FileNotFoundError(f"【115】{path} 不存在")
-        # 缓存路径
-        self._id_cache[path] = str(current_id)
-        return str(current_id)
-
     @staticmethod
     def _calc_sha1(filepath: Path, size: Optional[int] = None) -> str:
         """
@@ -305,6 +250,17 @@ class U115Pan(StorageBase, metaclass=Singleton):
                 while chunk := f.read(8192):
                     sha1.update(chunk)
         return sha1.hexdigest()
+
+    def _delay_get_item(self, path: Path) -> Optional[schemas.FileItem]:
+        """
+        自动延迟重试 get_item 模块
+        """
+        for _ in range(2):
+            time.sleep(2)
+            fileitem = self.get_item(path)
+            if fileitem:
+                return fileitem
+        return None
 
     def init_storage(self):
         pass
@@ -324,7 +280,11 @@ class U115Pan(StorageBase, metaclass=Singleton):
         else:
             cid = fileitem.fileid
             if not cid:
-                cid = self._path_to_id(fileitem.path)
+                _fileitem = self.get_item(Path(fileitem.path))
+                if not _fileitem:
+                    logger.warn(f"【115】获取目录 {fileitem.path} 失败！")
+                    return []
+                cid = _fileitem.fileid
 
         items = []
         offset = 0
@@ -343,8 +303,6 @@ class U115Pan(StorageBase, metaclass=Singleton):
             for item in resp:
                 # 更新缓存
                 path = f"{fileitem.path}{item['fn']}"
-                self._id_cache[path] = str(item["fid"])
-
                 file_path = path + ("/" if item["fc"] == "0" else "")
                 items.append(schemas.FileItem(
                     storage=self.schema.value,
@@ -375,7 +333,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
             "POST",
             "/open/folder/add",
             data={
-                "pid": int(parent_item.fileid),
+                "pid": int(parent_item.fileid or "0"),
                 "file_name": name
             }
         )
@@ -387,8 +345,6 @@ class U115Pan(StorageBase, metaclass=Singleton):
                 return self.get_item(new_path)
             logger.warn(f"【115】创建目录失败: {resp.get('error')}")
             return None
-        # 缓存新目录
-        self._id_cache[str(new_path)] = str(resp["data"]["file_id"])
         return schemas.FileItem(
             storage=self.schema.value,
             fileid=str(resp["data"]["file_id"]),
@@ -399,17 +355,37 @@ class U115Pan(StorageBase, metaclass=Singleton):
             modify_time=int(time.time())
         )
 
+    @staticmethod
+    def _log_progress(desc: str, total: int) -> tqdm:
+        """
+        创建一个可以输出到日志的进度条
+        """
+
+        class TqdmToLogger(io.StringIO):
+            def write(s, buf):  # noqa
+                buf = buf.strip('\r\n\t ')
+                if buf:
+                    logger.info(buf)
+
+        return tqdm(
+            total=total,
+            unit='B',
+            unit_scale=True,
+            desc=desc,
+            file=TqdmToLogger(),
+            mininterval=1.0,
+            maxinterval=5.0,
+            miniters=1
+        )
+
     def upload(self, target_dir: schemas.FileItem, local_path: Path,
                new_name: Optional[str] = None) -> Optional[schemas.FileItem]:
         """
         实现带秒传、断点续传和二次认证的文件上传
         """
 
-        def encode_callback(cb: dict):
-            """
-            回调参数Base64编码函数
-            """
-            return oss2.utils.b64encode_as_string(json.dumps(cb).strip())
+        def encode_callback(cb: str) -> str:
+            return oss2.utils.b64encode_as_string(cb)
 
         target_name = new_name or local_path.name
         target_path = Path(target_dir.path) / target_name
@@ -493,7 +469,32 @@ class U115Pan(StorageBase, metaclass=Singleton):
         # Step 3: 秒传
         if init_result.get("status") == 2:
             logger.info(f"【115】{target_name} 秒传成功")
-            return self.get_item(target_path)
+            file_id = init_result.get("file_id", None)
+            if file_id:
+                logger.debug(f"【115】{target_name} 使用秒传返回ID获取文件信息")
+                time.sleep(2)
+                info_resp = self._request_api(
+                    "GET",
+                    "/open/folder/get_info",
+                    "data",
+                    params={
+                        "file_id": int(file_id)
+                    }
+                )
+                if info_resp:
+                    return schemas.FileItem(
+                        storage=self.schema.value,
+                        fileid=str(info_resp["file_id"]),
+                        path=str(target_path) + ("/" if info_resp["file_category"] == "0" else ""),
+                        type="file" if info_resp["file_category"] == "1" else "dir",
+                        name=info_resp["file_name"],
+                        basename=Path(info_resp["file_name"]).stem,
+                        extension=Path(info_resp["file_name"]).suffix[1:] if info_resp["file_category"] == "1" else None,
+                        pickcode=info_resp["pick_code"],
+                        size=StringUtils.num_filesize(info_resp['size']) if info_resp["file_category"] == "1" else None,
+                        modify_time=info_resp["utime"]
+                    )
+            return self._delay_get_item(target_path)
 
         # Step 4: 获取上传凭证
         token_resp = self._request_api(
@@ -535,12 +536,6 @@ class U115Pan(StorageBase, metaclass=Singleton):
             security_token=SecurityToken
         )
         bucket = oss2.Bucket(auth, endpoint, bucket_name)  # noqa
-        # 处理oss请求回调
-        callback_dict = json.loads(callback.get("callback"))
-        callback_var_dict = json.loads(callback.get("callback_var"))
-        # 补充参数
-        logger.debug(f"【115】上传 Step 6 回调参数：{callback_dict} {callback_var_dict}")
-        # 填写不能包含Bucket名称在内的Object完整路径，例如exampledir/exampleobject.txt。
         # determine_part_size方法用于确定分片大小，设置分片大小为 100M
         part_size = determine_part_size(file_size, preferred_size=100 * 1024 * 1024)
 
@@ -584,8 +579,8 @@ class U115Pan(StorageBase, metaclass=Singleton):
 
         # 请求头
         headers = {
-            'X-oss-callback': encode_callback(callback_dict),
-            'x-oss-callback-var': encode_callback(callback_var_dict),
+            'X-oss-callback': encode_callback(callback["callback"]),
+            'x-oss-callback-var': encode_callback(callback["callback_var"]),
             'x-oss-forbid-overwrite': 'false'
         }
         try:
@@ -604,7 +599,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
                 logger.error(f"【115】{target_name} 上传失败: {e.status}, 错误码: {e.code}, 详情: {e.message}")
                 return None
         # 返回结果
-        return self.get_item(target_path)
+        return self._delay_get_item(target_path)
 
     def download(self, fileitem: schemas.FileItem, path: Path = None) -> Optional[Path]:
         """
@@ -666,13 +661,6 @@ class U115Pan(StorageBase, metaclass=Singleton):
         if not resp:
             return False
         if resp["state"]:
-            if fileitem.path in self._id_cache:
-                del self._id_cache[fileitem.path]
-                for key in list(self._id_cache.keys()):
-                    if key.startswith(fileitem.path):
-                        del self._id_cache[key]
-            new_path = Path(fileitem.path).parent / name
-            self._id_cache[str(new_path)] = fileitem.fileid
             return True
         return False
 
@@ -681,15 +669,12 @@ class U115Pan(StorageBase, metaclass=Singleton):
         获取指定路径的文件/目录项
         """
         try:
-            file_id = self._path_to_id(str(path))
-            if not file_id:
-                return None
             resp = self._request_api(
-                "GET",
+                "POST",
                 "/open/folder/get_info",
                 "data",
-                params={
-                    "file_id": int(file_id)
+                data={
+                    "path": str(path)
                 }
             )
             if not resp:
@@ -703,7 +688,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
                 basename=Path(resp["file_name"]).stem,
                 extension=Path(resp["file_name"]).suffix[1:] if resp["file_category"] == "1" else None,
                 pickcode=resp["pick_code"],
-                size=StringUtils.num_filesize(resp['size']) if resp["file_category"] == "1" else None,
+                size=resp['size_byte'] if resp["file_category"] == "1" else None,
                 modify_time=resp["utime"]
             )
         except Exception as e:
@@ -755,26 +740,25 @@ class U115Pan(StorageBase, metaclass=Singleton):
         企业级复制实现（支持目录递归复制）
         """
         src_fid = fileitem.fileid
-        dest_cid = self._path_to_id(str(path))
+        dest_fileitem = self.get_item(path)
+        if not dest_fileitem or dest_fileitem.type != "dir":
+            logger.warn(f"【115】目标路径 {path} 不是一个有效的目录！")
+            return False
 
         resp = self._request_api(
             "POST",
             "/open/ufile/copy",
             data={
                 "file_id": int(src_fid),
-                "pid": int(dest_cid)
+                "pid": int(dest_fileitem.fileid),
             }
         )
         if not resp:
             return False
         if resp["state"]:
             new_path = Path(path) / fileitem.name
-            new_item = self.get_item(new_path)
+            new_item = self._delay_get_item(new_path)
             self.rename(new_item, new_name)
-            # 更新缓存
-            del self._id_cache[fileitem.path]
-            rename_new_path = Path(path) / new_name
-            self._id_cache[str(rename_new_path)] = new_item.fileid
             return True
         return False
 
@@ -783,26 +767,24 @@ class U115Pan(StorageBase, metaclass=Singleton):
         原子性移动操作实现
         """
         src_fid = fileitem.fileid
-        dest_cid = self._path_to_id(str(path))
-
+        dest_fileitem = self.get_item(path)
+        if not dest_fileitem or dest_fileitem.type != "dir":
+            logger.warn(f"【115】目标路径 {path} 不是一个有效的目录！")
+            return False
         resp = self._request_api(
             "POST",
             "/open/ufile/move",
             data={
                 "file_ids": int(src_fid),
-                "to_cid": int(dest_cid)
+                "to_cid": int(dest_fileitem.fileid),
             }
         )
         if not resp:
             return False
         if resp["state"]:
             new_path = Path(path) / fileitem.name
-            new_file = self.get_item(new_path)
+            new_file = self._delay_get_item(new_path)
             self.rename(new_file, new_name)
-            # 更新缓存
-            del self._id_cache[fileitem.path]
-            rename_new_path = Path(path) / new_name
-            self._id_cache[str(rename_new_path)] = src_fid
             return True
         return False
 

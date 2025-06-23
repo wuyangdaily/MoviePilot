@@ -149,10 +149,11 @@ def seasons(tmdbid: int, _: schemas.TokenPayload = Depends(verify_token)) -> Any
     """
     查询媒体剧集组列表（themoviedb）
     """
-    mediainfo  = MediaChain().recognize_media(tmdbid=tmdbid, mtype=MediaType.TV)
+    mediainfo = MediaChain().recognize_media(tmdbid=tmdbid, mtype=MediaType.TV)
     if not mediainfo:
         return []
     return mediainfo.episode_groups
+
 
 @router.get("/seasons", summary="查询媒体季信息", response_model=List[schemas.MediaSeason])
 def seasons(mediaid: Optional[str] = None,
@@ -198,7 +199,7 @@ def seasons(mediaid: Optional[str] = None,
 
 
 @router.get("/{mediaid}", summary="查询媒体详情", response_model=schemas.MediaInfo)
-def detail(mediaid: str, type_name: str, title: Optional[str] = None, year: int = None,
+def detail(mediaid: str, type_name: str, title: Optional[str] = None, year: str = None,
            _: schemas.TokenPayload = Depends(verify_token)) -> Any:
     """
     根据媒体ID查询themoviedb或豆瓣媒体信息，type_name: 电影/电视剧
@@ -219,14 +220,13 @@ def detail(mediaid: str, type_name: str, title: Optional[str] = None, year: int 
         )
         event = eventmanager.send_event(ChainEventType.MediaRecognizeConvert, event_data)
         # 使用事件返回的上下文数据
-        if event and event.event_data:
+        if event and event.event_data and event.event_data.media_dict:
             event_data: MediaRecognizeConvertEventData = event.event_data
-            if event_data.media_dict:
-                new_id = event_data.media_dict.get("id")
-                if event_data.convert_type == "themoviedb":
-                    mediainfo = MediaChain().recognize_media(tmdbid=new_id, mtype=mtype)
-                elif event_data.convert_type == "douban":
-                    mediainfo = MediaChain().recognize_media(doubanid=new_id, mtype=mtype)
+            new_id = event_data.media_dict.get("id")
+            if event_data.convert_type == "themoviedb":
+                mediainfo = MediaChain().recognize_media(tmdbid=new_id, mtype=mtype)
+            elif event_data.convert_type == "douban":
+                mediainfo = MediaChain().recognize_media(doubanid=new_id, mtype=mtype)
         elif title:
             # 使用名称识别兜底
             meta = MetaInfo(title)

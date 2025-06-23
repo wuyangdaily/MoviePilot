@@ -1,6 +1,9 @@
+import sys
 import json
 import shutil
 import traceback
+import site
+import importlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Set
 
@@ -38,10 +41,33 @@ class PluginHelper(metaclass=Singleton):
                 if self.install_report():
                     self.systemconfig.set(SystemConfigKey.PluginInstallReport, "1")
 
-    @cached(maxsize=1000, ttl=1800)
-    def get_plugins(self, repo_url: str, package_version: Optional[str] = None) -> Optional[Dict[str, dict]]:
+    def get_plugins(self, repo_url: str, package_version: Optional[str] = None,
+                    force: bool = False) -> Optional[Dict[str, dict]]:
         """
         获取Github所有最新插件列表
+        :param repo_url: Github仓库地址
+        :param package_version: 首选插件版本 (如 "v2", "v3")，如果不指定则获取 v1 版本
+        :param force: 是否强制刷新，忽略缓存
+        """
+        # 如果强制刷新，直接调用不带缓存的版本
+        if force:
+            return self._get_plugins_uncached(repo_url, package_version)
+        
+        # 正常情况下调用带缓存的版本
+        return self._get_plugins_cached(repo_url, package_version)
+    
+    @cached(maxsize=64, ttl=1800)
+    def _get_plugins_cached(self, repo_url: str, package_version: Optional[str] = None) -> Optional[Dict[str, dict]]:
+        """
+        获取Github所有最新插件列表（使用缓存）
+        :param repo_url: Github仓库地址
+        :param package_version: 首选插件版本 (如 "v2", "v3")，如果不指定则获取 v1 版本
+        """
+        return self._get_plugins_uncached(repo_url, package_version)
+    
+    def _get_plugins_uncached(self, repo_url: str, package_version: Optional[str] = None) -> Optional[Dict[str, dict]]:
+        """
+        获取Github所有最新插件列表（不使用缓存）
         :param repo_url: Github仓库地址
         :param package_version: 首选插件版本 (如 "v2", "v3")，如果不指定则获取 v1 版本
         """
@@ -451,19 +477,22 @@ class PluginHelper(metaclass=Singleton):
     @staticmethod
     def __pip_install_with_fallback(requirements_file: Path) -> Tuple[bool, str]:
         """
-        使用自动降级策略，PIP 安装依赖，优先级依次为镜像站、代理、直连
+        使用自动降级策略安装依赖，并确保新安装的包可被动态导入
         :param requirements_file: 依赖的 requirements.txt 文件路径
         :return: (是否成功, 错误信息)
         """
+        base_cmd = [sys.executable, "-m", "pip", "install", "-r", str(requirements_file)]
         strategies = []
 
         # 添加策略到列表中
         if settings.PIP_PROXY:
-            strategies.append(("镜像站", ["pip", "install", "-r", str(requirements_file), "-i", settings.PIP_PROXY]))
+            strategies.append(("镜像站", base_cmd + ["-i", settings.PIP_PROXY]))
         if settings.PROXY_HOST:
-            strategies.append(
-                ("代理", ["pip", "install", "-r", str(requirements_file), "--proxy", settings.PROXY_HOST]))
-        strategies.append(("直连", ["pip", "install", "-r", str(requirements_file)]))
+            strategies.append(("代理", base_cmd + ["--proxy", settings.PROXY_HOST]))
+        strategies.append(("直连", base_cmd))
+
+        # 记录当前已安装的包，以便后续刷新
+        before_installation = set(sys.modules.keys())
 
         # 遍历策略进行安装
         for strategy_name, pip_command in strategies:
@@ -471,6 +500,16 @@ class PluginHelper(metaclass=Singleton):
             success, message = SystemUtils.execute_with_subprocess(pip_command)
             if success:
                 logger.debug(f"[PIP] 策略：{strategy_name} 安装依赖成功，输出：{message}")
+                # 安装成功后刷新Python的模块系统
+                importlib.reload(site)
+                # 获取新安装的模块
+                current_modules = set(sys.modules.keys())
+                new_modules = current_modules - before_installation
+                # 重新加载新安装的模块
+                for module in new_modules:
+                    if module in sys.modules:
+                        del sys.modules[module]
+                logger.debug(f"[PIP] 已刷新导入系统，新加载的模块: {new_modules}")
                 return True, message
             else:
                 logger.error(f"[PIP] 策略：{strategy_name} 安装依赖失败，错误信息：{message}")

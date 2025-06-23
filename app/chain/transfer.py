@@ -17,6 +17,7 @@ from app.core.config import settings, global_vars
 from app.core.context import MediaInfo
 from app.core.meta import MetaBase
 from app.core.metainfo import MetaInfoPath
+from app.core.event import eventmanager
 from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db.models.downloadhistory import DownloadHistory
 from app.db.models.transferhistory import TransferHistory
@@ -29,7 +30,8 @@ from app.log import logger
 from app.schemas import TransferInfo, TransferTorrent, Notification, EpisodeFormat, FileItem, TransferDirectoryConf, \
     TransferTask, TransferQueue, TransferJob, TransferJobTask
 from app.schemas.types import TorrentStatus, EventType, MediaType, ProgressKey, NotificationType, MessageChannel, \
-    SystemConfigKey
+    SystemConfigKey, ChainEventType, ContentType
+from app.schemas import StorageOperSelectionEventData
 from app.utils.singleton import Singleton
 from app.utils.string import StringUtils
 
@@ -326,7 +328,8 @@ class JobManager:
             # 计算状态为完成的任务数
             if __mediaid__ not in self._job_view:
                 return 0
-            return sum([task.fileitem.size for task in self._job_view[__mediaid__].tasks if task.state == "completed" and task.fileitem.size is not None])
+            return sum([task.fileitem.size for task in self._job_view[__mediaid__].tasks if
+                        task.state == "completed" and task.fileitem.size is not None])
 
     def total(self) -> int:
         """
@@ -369,14 +372,6 @@ class TransferChain(ChainBase, metaclass=Singleton):
 
     def __init__(self):
         super().__init__()
-        self.downloadhis = DownloadHistoryOper()
-        self.transferhis = TransferHistoryOper()
-        self.progress = ProgressHelper()
-        self.mediachain = MediaChain()
-        self.tmdbchain = TmdbChain()
-        self.storagechain = StorageChain()
-        self.systemconfig = SystemConfigOper()
-        self.directoryhelper = DirectoryHelper()
         self.jobview = JobManager()
 
         # 启动整理任务
@@ -395,11 +390,12 @@ class TransferChain(ChainBase, metaclass=Singleton):
         """
         整理完成后处理
         """
+        transferhis = TransferHistoryOper()
         if not transferinfo.success:
             # 转移失败
             logger.warn(f"{task.fileitem.name} 入库失败：{transferinfo.message}")
             # 新增转移失败历史记录
-            self.transferhis.add_fail(
+            transferhis.add_fail(
                 fileitem=task.fileitem,
                 mode=transferinfo.transfer_type if transferinfo else '',
                 downloader=task.downloader,
@@ -426,7 +422,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
         logger.info(f"{task.fileitem.name} 入库成功：{transferinfo.target_diritem.path}")
 
         # 新增转移成功历史记录
-        self.transferhis.add_success(
+        transferhis.add_success(
             fileitem=task.fileitem,
             mode=transferinfo.transfer_type if transferinfo else '',
             downloader=task.downloader,
@@ -455,6 +451,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
                     tasks = self.jobview.success_tasks(task.mediainfo, task.meta.begin_season)
                     # 记录已处理的种子hash
                     processed_hashes = set()
+                    storagechain = StorageChain()
                     for t in tasks:
                         # 下载器hash
                         if t.download_hash and t.download_hash not in processed_hashes:
@@ -463,7 +460,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
                                 logger.info(f"移动模式删除种子成功：{t.download_hash} ")
                         # 删除残留目录
                         if t.fileitem:
-                            self.storagechain.delete_media_file(t.fileitem, delete_self=False)
+                            storagechain.delete_media_file(t.fileitem, delete_self=False)
             # 整理完成且有成功的任务时
             if self.jobview.is_finished(task):
                 # 发送通知，实时手动整理时不发
@@ -541,6 +538,8 @@ class TransferChain(ChainBase, metaclass=Singleton):
         # 失败数量
         fail_num = 0
 
+        progress = ProgressHelper()
+
         while not global_vars.is_system_stopped:
             try:
                 item: TransferQueue = self._queue.get(block=False)
@@ -554,24 +553,24 @@ class TransferChain(ChainBase, metaclass=Singleton):
                     if __queue_start:
                         logger.info("开始整理队列处理...")
                         # 启动进度
-                        self.progress.start(ProgressKey.FileTransfer)
+                        progress.start(ProgressKey.FileTransfer)
                         # 重置计数
                         processed_num = 0
                         fail_num = 0
                         total_num = self.jobview.total()
                         __process_msg = f"开始整理队列处理，当前共 {total_num} 个文件 ..."
                         logger.info(__process_msg)
-                        self.progress.update(value=0,
-                                             text=__process_msg,
-                                             key=ProgressKey.FileTransfer)
+                        progress.update(value=0,
+                                        text=__process_msg,
+                                        key=ProgressKey.FileTransfer)
                         # 队列已开始
                         __queue_start = False
                     # 更新进度
                     __process_msg = f"正在整理 {fileitem.name} ..."
                     logger.info(__process_msg)
-                    self.progress.update(value=processed_num / total_num * 100,
-                                         text=__process_msg,
-                                         key=ProgressKey.FileTransfer)
+                    progress.update(value=processed_num / total_num * 100,
+                                    text=__process_msg,
+                                    key=ProgressKey.FileTransfer)
                     # 整理
                     state, err_msg = self.__handle_transfer(task=task, callback=item.callback)
                     if not state:
@@ -581,18 +580,18 @@ class TransferChain(ChainBase, metaclass=Singleton):
                     processed_num += 1
                     __process_msg = f"{fileitem.name} 整理完成"
                     logger.info(__process_msg)
-                    self.progress.update(value=processed_num / total_num * 100,
-                                         text=__process_msg,
-                                         key=ProgressKey.FileTransfer)
+                    progress.update(value=processed_num / total_num * 100,
+                                    text=__process_msg,
+                                    key=ProgressKey.FileTransfer)
             except queue.Empty:
                 if not __queue_start:
                     # 结束进度
                     __end_msg = f"整理队列处理完成，共整理 {processed_num} 个文件，失败 {fail_num} 个"
                     logger.info(__end_msg)
-                    self.progress.update(value=100,
-                                         text=__end_msg,
-                                         key=ProgressKey.FileTransfer)
-                    self.progress.end(ProgressKey.FileTransfer)
+                    progress.update(value=100,
+                                    text=__end_msg,
+                                    key=ProgressKey.FileTransfer)
+                    progress.end(ProgressKey.FileTransfer)
                     # 重置计数
                     processed_num = 0
                     fail_num = 0
@@ -612,6 +611,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
         """
         try:
             # 识别
+            transferhis = TransferHistoryOper()
             if not task.mediainfo:
                 mediainfo = None
                 download_history = task.download_history
@@ -631,7 +631,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
                                 mediainfo.category = download_history.media_category
                 else:
                     # 识别媒体信息
-                    mediainfo = self.mediachain.recognize_by_meta(task.meta)
+                    mediainfo = MediaChain().recognize_by_meta(task.meta)
 
                 # 更新媒体图片
                 if mediainfo:
@@ -639,7 +639,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
 
                 if not mediainfo:
                     # 新增整理失败历史记录
-                    his = self.transferhis.add_fail(
+                    his = transferhis.add_fail(
                         fileitem=task.fileitem,
                         mode=task.transfer_type,
                         meta=task.meta,
@@ -659,8 +659,8 @@ class TransferChain(ChainBase, metaclass=Singleton):
 
                 # 如果未开启新增已入库媒体是否跟随TMDB信息变化则根据tmdbid查询之前的title
                 if not settings.SCRAP_FOLLOW_TMDB:
-                    transfer_history = self.transferhis.get_by_type_tmdbid(tmdbid=mediainfo.tmdb_id,
-                                                                           mtype=mediainfo.type.value)
+                    transfer_history = transferhis.get_by_type_tmdbid(tmdbid=mediainfo.tmdb_id,
+                                                                      mtype=mediainfo.type.value)
                     if transfer_history:
                         mediainfo.title = transfer_history.title
 
@@ -680,7 +680,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
                 # 默认值1
                 if season_num is None:
                     season_num = 1
-                task.episodes_info = self.tmdbchain.tmdb_episodes(
+                task.episodes_info = TmdbChain().tmdb_episodes(
                     tmdbid=task.mediainfo.tmdb_id,
                     season=season_num,
                     episode_group=task.mediainfo.episode_group
@@ -690,18 +690,44 @@ class TransferChain(ChainBase, metaclass=Singleton):
             if not task.target_directory:
                 if task.target_path:
                     # 指定目标路径，`手动整理`场景下使用，忽略源目录匹配，使用指定目录匹配
-                    task.target_directory = self.directoryhelper.get_dir(media=task.mediainfo,
-                                                                         dest_path=task.target_path,
-                                                                         target_storage=task.target_storage)
+                    task.target_directory = DirectoryHelper().get_dir(media=task.mediainfo,
+                                                                      dest_path=task.target_path,
+                                                                      target_storage=task.target_storage)
                 else:
                     # 启用源目录匹配时，根据源目录匹配下载目录，否则按源目录同盘优先原则，如无源目录，则根据媒体信息获取目标目录
-                    task.target_directory = self.directoryhelper.get_dir(media=task.mediainfo,
-                                                                         storage=task.fileitem.storage,
-                                                                         src_path=Path(task.fileitem.path),
-                                                                         target_storage=task.target_storage)
+                    task.target_directory = DirectoryHelper().get_dir(media=task.mediainfo,
+                                                                      storage=task.fileitem.storage,
+                                                                      src_path=Path(task.fileitem.path),
+                                                                      target_storage=task.target_storage)
+            if not task.target_storage and task.target_directory:
+                task.target_storage = task.target_directory.library_storage
 
             # 正在处理
             self.jobview.running_task(task)
+
+            # 广播事件，请示额外的源存储支持
+            source_oper = None
+            source_event_data = StorageOperSelectionEventData(
+                storage=task.fileitem.storage,
+            )
+            source_event = eventmanager.send_event(ChainEventType.StorageOperSelection, source_event_data)
+            # 使用事件返回的上下文数据
+            if source_event and source_event.event_data:
+                source_event_data: StorageOperSelectionEventData = source_event.event_data
+                if source_event_data.storage_oper:
+                    source_oper = source_event_data.storage_oper
+
+            # 广播事件，请示额外的目标存储支持
+            target_oper = None
+            target_event_data = StorageOperSelectionEventData(
+                storage=task.target_storage,
+            )
+            target_event = eventmanager.send_event(ChainEventType.StorageOperSelection, target_event_data)
+            # 使用事件返回的上下文数据
+            if target_event and target_event.event_data:
+                target_event_data: StorageOperSelectionEventData = target_event.event_data
+                if target_event_data.storage_oper:
+                    target_oper = target_event_data.storage_oper
 
             # 执行整理
             transferinfo: TransferInfo = self.transfer(fileitem=task.fileitem,
@@ -714,7 +740,9 @@ class TransferChain(ChainBase, metaclass=Singleton):
                                                        episodes_info=task.episodes_info,
                                                        scrape=task.scrape,
                                                        library_type_folder=task.library_type_folder,
-                                                       library_category_folder=task.library_category_folder)
+                                                       library_category_folder=task.library_category_folder,
+                                                       source_oper=source_oper,
+                                                       target_oper=target_oper)
             if not transferinfo:
                 logger.error("文件整理模块运行失败")
                 return False, "文件整理模块运行失败"
@@ -754,7 +782,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
         # 全局锁，避免重复处理
         with downloader_lock:
             # 获取下载器监控目录
-            download_dirs = self.directoryhelper.get_download_dirs()
+            download_dirs = DirectoryHelper().get_download_dirs()
             # 如果没有下载器监控的目录则不处理
             if not any(dir_info.monitor_type == "downloader" and dir_info.storage == "local"
                        for dir_info in download_dirs):
@@ -790,7 +818,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
                     logger.debug(f"文件 {file_path} 不在下载器监控目录中，不通过下载器进行整理")
                     continue
                 # 查询下载记录识别情况
-                downloadhis: DownloadHistory = self.downloadhis.get_by_hash(torrent.hash)
+                downloadhis: DownloadHistory = DownloadHistoryOper().get_by_hash(torrent.hash)
                 if downloadhis:
                     # 类型
                     try:
@@ -829,26 +857,31 @@ class TransferChain(ChainBase, metaclass=Singleton):
                 )
 
                 # 设置下载任务状态
-                if state:
-                    self.transfer_completed(hashs=torrent.hash)
+                if not state:
+                    logger.warn(f"整理下载器任务失败：{torrent.hash} - {errmsg}")
+                self.transfer_completed(hashs=torrent.hash, downloader=torrent.downloader)
 
             # 结束
             logger.info("所有下载器中下载完成的文件已整理完成")
             return True
 
-    def __get_trans_fileitems(self, fileitem: FileItem) -> List[Tuple[FileItem, bool]]:
+    def __get_trans_fileitems(
+            self, fileitem: FileItem, depth: int = 1
+    ) -> List[Tuple[FileItem, bool]]:
         """
         获取整理目录或文件列表
+        
         :param fileitem: 文件项
+        :param depth: 递归深度，默认为1
         """
+        storagechain = StorageChain()
 
-        def __is_bluray_dir(_fileitem: FileItem) -> bool:
+        def __contains_bluray_sub(_fileitems: List[FileItem]) -> bool:
             """
-            判断是不是蓝光目录
+            判断是否包含蓝光子目录
             """
-            subs = self.storagechain.list_files(_fileitem)
-            if subs:
-                for sub in subs:
+            if _fileitems:
+                for sub in _fileitems:
                     if sub.type == "dir" and sub.name in ["BDMV", "CERTIFICATE"]:
                         return True
             return False
@@ -865,10 +898,10 @@ class TransferChain(ChainBase, metaclass=Singleton):
             """
             for p in _path.parents:
                 if p.name == "BDMV":
-                    return self.storagechain.get_file_item(storage=_storage, path=p.parent)
+                    return storagechain.get_file_item(storage=_storage, path=p.parent)
             return None
 
-        if not self.storagechain.get_item(fileitem):
+        if not storagechain.get_item(fileitem):
             logger.warn(f"目录或文件不存在：{fileitem.path}")
             return []
 
@@ -883,25 +916,22 @@ class TransferChain(ChainBase, metaclass=Singleton):
             return [(fileitem, False)]
 
         # 蓝光原盘根目录
-        if __is_bluray_dir(fileitem):
+        sub_items = storagechain.list_files(fileitem) or []
+        if __contains_bluray_sub(sub_items):
             return [(fileitem, True)]
 
         # 需要整理的文件项列表
         trans_items = []
         # 先检查当前目录的下级目录，以支持合集的情况
-        for sub_dir in self.storagechain.list_files(fileitem):
+        for sub_dir in sub_items if depth >= 1 else []:
             if sub_dir.type == "dir":
-                if __is_bluray_dir(sub_dir):
-                    trans_items.append((sub_dir, True))
-                else:
-                    trans_items.append((sub_dir, False))
+                trans_items.extend(self.__get_trans_fileitems(sub_dir, depth=depth - 1))
 
         if not trans_items:
             # 没有有效子目录，直接整理当前目录
             trans_items.append((fileitem, False))
         else:
             # 有子目录时，把当前目录的文件添加到整理任务中
-            sub_items = self.storagechain.list_files(fileitem)
             if sub_items:
                 trans_items.extend([(f, False) for f in sub_items if f.type == "file"])
 
@@ -963,11 +993,13 @@ class TransferChain(ChainBase, metaclass=Singleton):
                                        offset=epformat.offset) if epformat else None
 
         # 整理屏蔽词
-        transfer_exclude_words = self.systemconfig.get(SystemConfigKey.TransferExcludeWords)
+        transfer_exclude_words = SystemConfigOper().get(SystemConfigKey.TransferExcludeWords)
         # 汇总错误信息
         err_msgs: List[str] = []
         # 待整理目录或文件项
-        trans_items = self.__get_trans_fileitems(fileitem)
+        trans_items = self.__get_trans_fileitems(
+            fileitem, depth=2  # 为解决 issue#4371 深度至少需要>=2
+        )
         # 待整理的文件列表
         file_items: List[Tuple[FileItem, bool]] = []
 
@@ -980,7 +1012,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
             # 如果是目录且不是⼀蓝光原盘，获取所有文件并整理
             if trans_item.type == "dir" and not bluray_dir:
                 # 遍历获取下载目录所有文件（递归）
-                if files := self.storagechain.list_files(trans_item, recursion=True):
+                if files := StorageChain().list_files(trans_item, recursion=True):
                     file_items.extend([(file, False) for file in files])
             else:
                 file_items.append((trans_item, bluray_dir))
@@ -1029,7 +1061,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
 
             # 整理成功的不再处理
             if not force:
-                transferd = self.transferhis.get_by_src(file_item.path, storage=file_item.storage)
+                transferd = TransferHistoryOper().get_by_src(file_item.path, storage=file_item.storage)
                 if transferd:
                     if not transferd.status:
                         all_success = False
@@ -1065,14 +1097,15 @@ class TransferChain(ChainBase, metaclass=Singleton):
 
             # 根据父路径获取下载历史
             download_history = None
+            downloadhis = DownloadHistoryOper()
             if bluray_dir:
                 # 蓝光原盘，按目录名查询
-                download_history = self.downloadhis.get_by_path(str(file_path))
+                download_history = downloadhis.get_by_path(str(file_path))
             else:
                 # 按文件全路径查询
-                download_file = self.downloadhis.get_file_by_fullpath(str(file_path))
+                download_file = downloadhis.get_file_by_fullpath(str(file_path))
                 if download_file:
-                    download_history = self.downloadhis.get_by_hash(download_file.download_hash)
+                    download_history = downloadhis.get_by_hash(download_file.download_hash)
 
             # 获取下载Hash
             if download_history and (not downloader or not download_hash):
@@ -1115,12 +1148,13 @@ class TransferChain(ChainBase, metaclass=Singleton):
             fail_num = 0
 
             # 启动进度
-            self.progress.start(ProgressKey.FileTransfer)
+            progress = ProgressHelper()
+            progress.start(ProgressKey.FileTransfer)
             __process_msg = f"开始整理，共 {total_num} 个文件 ..."
             logger.info(__process_msg)
-            self.progress.update(value=0,
-                                 text=__process_msg,
-                                 key=ProgressKey.FileTransfer)
+            progress.update(value=0,
+                            text=__process_msg,
+                            key=ProgressKey.FileTransfer)
 
             for transfer_task in transfer_tasks:
                 if global_vars.is_system_stopped:
@@ -1130,9 +1164,9 @@ class TransferChain(ChainBase, metaclass=Singleton):
                 # 更新进度
                 __process_msg = f"正在整理 （{processed_num + fail_num + 1}/{total_num}）{transfer_task.fileitem.name} ..."
                 logger.info(__process_msg)
-                self.progress.update(value=(processed_num + fail_num) / total_num * 100,
-                                     text=__process_msg,
-                                     key=ProgressKey.FileTransfer)
+                progress.update(value=(processed_num + fail_num) / total_num * 100,
+                                text=__process_msg,
+                                key=ProgressKey.FileTransfer)
                 state, err_msg = self.__handle_transfer(
                     task=transfer_task,
                     callback=self.__default_callback
@@ -1148,10 +1182,10 @@ class TransferChain(ChainBase, metaclass=Singleton):
             # 整理结束
             __end_msg = f"整理队列处理完成，共整理 {total_num} 个文件，失败 {fail_num} 个"
             logger.info(__end_msg)
-            self.progress.update(value=100,
-                                 text=__end_msg,
-                                 key=ProgressKey.FileTransfer)
-            self.progress.end(ProgressKey.FileTransfer)
+            progress.update(value=100,
+                            text=__end_msg,
+                            key=ProgressKey.FileTransfer)
+            progress.end(ProgressKey.FileTransfer)
 
         return all_success, "，".join(err_msgs)
 
@@ -1206,7 +1240,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
         :param mediaid: TMDB ID/豆瓣ID
         """
         # 查询历史记录
-        history: TransferHistory = self.transferhis.get(logid)
+        history: TransferHistory = TransferHistoryOper().get(logid)
         if not history:
             logger.error(f"整理记录不存在，ID：{logid}")
             return False, "整理记录不存在"
@@ -1222,7 +1256,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
                 # 更新媒体图片
                 self.obtain_images(mediainfo=mediainfo)
         else:
-            mediainfo = self.mediachain.recognize_by_path(str(src_path), episode_group=history.episode_group)
+            mediainfo = MediaChain().recognize_by_path(str(src_path), episode_group=history.episode_group)
         if not mediainfo:
             return False, f"未识别到媒体信息，类型：{mtype.value}，id：{mediaid}"
         # 重新执行整理
@@ -1232,7 +1266,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
         if history.dest_fileitem:
             # 解析目标文件对象
             dest_fileitem = FileItem(**history.dest_fileitem)
-            self.storagechain.delete_file(dest_fileitem)
+            StorageChain().delete_file(dest_fileitem)
 
         # 强制整理
         if history.src_fileitem:
@@ -1287,18 +1321,19 @@ class TransferChain(ChainBase, metaclass=Singleton):
         if tmdbid or doubanid:
             # 有输入TMDBID时单个识别
             # 识别媒体信息
-            mediainfo: MediaInfo = self.mediachain.recognize_media(tmdbid=tmdbid, doubanid=doubanid,
-                                                                   mtype=mtype, episode_group=episode_group)
+            mediainfo: MediaInfo = MediaChain().recognize_media(tmdbid=tmdbid, doubanid=doubanid,
+                                                                mtype=mtype, episode_group=episode_group)
             if not mediainfo:
                 return False, f"媒体信息识别失败，tmdbid：{tmdbid}，doubanid：{doubanid}，type: {mtype.value}"
             else:
                 # 更新媒体图片
                 self.obtain_images(mediainfo=mediainfo)
             # 开始进度
-            self.progress.start(ProgressKey.FileTransfer)
-            self.progress.update(value=0,
-                                 text=f"开始整理 {fileitem.path} ...",
-                                 key=ProgressKey.FileTransfer)
+            progress = ProgressHelper()
+            progress.start(ProgressKey.FileTransfer)
+            progress.update(value=0,
+                            text=f"开始整理 {fileitem.path} ...",
+                            key=ProgressKey.FileTransfer)
             # 开始整理
             state, errmsg = self.do_transfer(
                 fileitem=fileitem,
@@ -1319,7 +1354,7 @@ class TransferChain(ChainBase, metaclass=Singleton):
             if not state:
                 return False, errmsg
 
-            self.progress.end(ProgressKey.FileTransfer)
+            progress.end(ProgressKey.FileTransfer)
             logger.info(f"{fileitem.path} 整理完成")
             return True, ""
         else:
@@ -1340,26 +1375,22 @@ class TransferChain(ChainBase, metaclass=Singleton):
             return state, errmsg
 
     def send_transfer_message(self, meta: MetaBase, mediainfo: MediaInfo,
-                              transferinfo: TransferInfo, season_episode: Optional[str] = None, username: Optional[str] = None):
+                              transferinfo: TransferInfo, season_episode: Optional[str] = None,
+                              username: Optional[str] = None):
         """
         发送入库成功的消息
         """
-        msg_title = f"{mediainfo.title_year} {meta.season_episode if not season_episode else season_episode} 已入库"
-        if mediainfo.vote_average:
-            msg_str = f"评分：{mediainfo.vote_average}，类型：{mediainfo.type.value}"
-        else:
-            msg_str = f"类型：{mediainfo.type.value}"
-        if mediainfo.category:
-            msg_str = f"{msg_str}，类别：{mediainfo.category}"
-        if meta.resource_term:
-            msg_str = f"{msg_str}，质量：{meta.resource_term}"
-        msg_str = f"{msg_str}，共{transferinfo.file_count}个文件，" \
-                  f"大小：{StringUtils.str_filesize(transferinfo.total_size)}"
-        if transferinfo.message:
-            msg_str = f"{msg_str}，以下文件处理失败：\n{transferinfo.message}"
-        # 发送
-        self.post_message(Notification(
-            mtype=NotificationType.Organize,
-            title=msg_title, text=msg_str, image=mediainfo.get_message_image(),
-            username=username,
-            link=settings.MP_DOMAIN('#/history')))
+        self.post_message(
+            Notification(
+                mtype=NotificationType.Organize,
+                ctype=ContentType.OrganizeSuccess,
+                image=mediainfo.get_message_image(),
+                username=username,
+                link=settings.MP_DOMAIN('#/history')
+            ),
+            meta=meta,
+            mediainfo=mediainfo,
+            transferinfo=transferinfo,
+            season_episode=season_episode,
+            username=username
+        )

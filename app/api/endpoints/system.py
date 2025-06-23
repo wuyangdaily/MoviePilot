@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import re
 import tempfile
 from collections import deque
 from datetime import datetime
@@ -20,23 +21,24 @@ from app.core.config import global_vars, settings
 from app.core.metainfo import MetaInfo
 from app.core.module import ModuleManager
 from app.core.security import verify_apitoken, verify_resource_token, verify_token
+from app.core.event import eventmanager
 from app.db.models import User
 from app.db.systemconfig_oper import SystemConfigOper
 from app.db.user_oper import get_current_active_superuser
 from app.helper.mediaserver import MediaServerHelper
-from app.helper.message import MessageHelper, MessageQueueManager
+from app.helper.message import MessageHelper
 from app.helper.progress import ProgressHelper
 from app.helper.rule import RuleHelper
 from app.helper.sites import SitesHelper
 from app.helper.subscribe import SubscribeHelper
+from app.helper.system import SystemHelper
 from app.log import logger
-from app.monitor import Monitor
 from app.scheduler import Scheduler
-from app.schemas.types import SystemConfigKey
+from app.schemas import ConfigChangeEventData
+from app.schemas.types import SystemConfigKey, EventType
 from app.utils.crypto import HashUtils
 from app.utils.http import RequestUtils
 from app.utils.security import SecurityUtils
-from app.utils.system import SystemUtils
 from app.utils.url import UrlUtils
 from version import APP_VERSION
 
@@ -171,10 +173,13 @@ def cache_img(
 
 
 @router.get("/global", summary="查询非敏感系统设置", response_model=schemas.Response)
-def get_global_setting():
+def get_global_setting(token: str):
     """
-    查询非敏感系统设置（无需鉴权）
+    查询非敏感系统设置（默认鉴权）
     """
+    if token != "moviepilot":
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     # FIXME: 新增敏感配置项时要在此处添加排除项
     info = settings.dict(
         exclude={"SECRET_KEY", "RESOURCE_SECRET_KEY", "API_TOKEN", "TMDB_API_KEY", "TVDB_API_KEY", "FANART_API_KEY",
@@ -216,17 +221,26 @@ def set_env_setting(env: dict,
     result = settings.update_settings(env=env)
     # 统计成功和失败的结果
     success_updates = {k: v for k, v in result.items() if v[0]}
-    failed_updates = {k: v for k, v in result.items() if not v[0]}
+    failed_updates = {k: v for k, v in result.items() if v[0] is False}
 
     if failed_updates:
         return schemas.Response(
             success=False,
-            message="部分配置项更新失败",
+            message=f"{', '.join([v[1] for v in failed_updates.values()])}",
             data={
                 "success_updates": success_updates,
                 "failed_updates": failed_updates
             }
         )
+
+    if success_updates:
+        for key in success_updates.keys():
+            # 发送配置变更事件
+            eventmanager.send_event(etype=EventType.ConfigChanged, data=ConfigChangeEventData(
+                key=key,
+                value=getattr(settings, key, None),
+                change_type="update"
+            ))
 
     return schemas.Response(
         success=True,
@@ -281,12 +295,28 @@ def set_setting(key: str, value: Union[list, dict, bool, int, str] = None,
     """
     if hasattr(settings, key):
         success, message = settings.update_setting(key=key, value=value)
+        if success:
+            # 发送配置变更事件
+            eventmanager.send_event(etype=EventType.ConfigChanged, data=ConfigChangeEventData(
+                key=key,
+                value=value,
+                change_type="update"
+            ))
+        elif success is None:
+            success = True
         return schemas.Response(success=success, message=message)
     elif key in {item.value for item in SystemConfigKey}:
         if isinstance(value, list):
             value = list(filter(None, value))
             value = value if value else None
-        SystemConfigOper().set(key, value)
+        success = SystemConfigOper().set(key, value)
+        if success:
+            # 发送配置变更事件
+            eventmanager.send_event(etype=EventType.ConfigChanged, data=ConfigChangeEventData(
+                key=key,
+                value=value,
+                change_type="update"
+            ))
         return schemas.Response(success=True)
     else:
         return schemas.Response(success=False, message=f"配置项 '{key}' 不存在")
@@ -417,30 +447,55 @@ def ruletest(title: str,
 
 
 @router.get("/nettest", summary="测试网络连通性")
-def nettest(url: str,
-            proxy: bool,
-            _: schemas.TokenPayload = Depends(verify_token)):
+def nettest(
+    url: str,
+    proxy: bool,
+    include: Optional[str] = None,
+    _: schemas.TokenPayload = Depends(verify_token),
+):
     """
     测试网络连通性
     """
     # 记录开始的毫秒数
     start_time = datetime.now()
+    headers = None
+    if "github" in url or "{GITHUB_PROXY}" in url:
+        # 这是github的连通性测试
+        url = url.replace(
+            "{GITHUB_PROXY}", UrlUtils.standardize_base_url(settings.GITHUB_PROXY or "")
+        )
+        headers = settings.GITHUB_HEADERS
     url = url.replace("{TMDBAPIKEY}", settings.TMDB_API_KEY)
-    result = RequestUtils(proxies=settings.PROXY if proxy else None,
-                          ua=settings.USER_AGENT).get_res(url)
+    url = url.replace(
+        "{PIP_PROXY}",
+        UrlUtils.standardize_base_url(settings.PIP_PROXY or "https://pypi.org/simple/"),
+    )
+    result = RequestUtils(
+        proxies=settings.PROXY if proxy else None,
+        headers=headers,
+        timeout=10,
+        ua=settings.USER_AGENT,
+    ).get_res(url)
     # 计时结束的毫秒数
     end_time = datetime.now()
+    time = round((end_time - start_time).total_seconds() * 1000)
     # 计算相关秒数
-    if result and result.status_code == 200:
-        return schemas.Response(success=True, data={
-            "time": round((end_time - start_time).microseconds / 1000)
-        })
-    elif result:
-        return schemas.Response(success=False, message=f"错误码：{result.status_code}", data={
-            "time": round((end_time - start_time).microseconds / 1000)
-        })
+    if result is None:
+        return schemas.Response(success=False, message="无法连接", data={"time": time})
+    elif result.status_code == 200:
+        if include and not re.search(r"%s" % include, result.text, re.IGNORECASE):
+            # 通常是被加速代理跳转到其它页面了
+            logger.error(f"{url} 的响应内容不匹配包含规则 {include}")
+            return schemas.Response(
+                success=False,
+                message=f"无效响应，不匹配 {include}",
+                data={"time": time},
+            )
+        return schemas.Response(success=True, data={"time": time})
     else:
-        return schemas.Response(success=False, message="网络连接失败！")
+        return schemas.Response(
+            success=False, message=f"错误码：{result.status_code}", data={"time": time}
+        )
 
 
 @router.get("/modulelist", summary="查询已加载的模块ID列表", response_model=schemas.Response)
@@ -471,25 +526,13 @@ def restart_system(_: User = Depends(get_current_active_superuser)):
     """
     重启系统（仅管理员）
     """
-    if not SystemUtils.can_restart():
+    if not SystemHelper.can_restart():
         return schemas.Response(success=False, message="当前运行环境不支持重启操作！")
     # 标识停止事件
     global_vars.stop_system()
     # 执行重启
-    ret, msg = SystemUtils.restart()
+    ret, msg = SystemHelper.restart()
     return schemas.Response(success=ret, message=msg)
-
-
-@router.get("/reload", summary="重新加载模块", response_model=schemas.Response)
-def reload_module(_: User = Depends(get_current_active_superuser)):
-    """
-    重新加载模块（仅管理员）
-    """
-    MessageQueueManager().init_config()
-    ModuleManager().reload()
-    Scheduler().init()
-    Monitor().init()
-    return schemas.Response(success=True)
 
 
 @router.get("/runscheduler", summary="运行服务", response_model=schemas.Response)

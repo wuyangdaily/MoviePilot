@@ -1,7 +1,8 @@
 from typing import Callable, Any, Optional
 
-from playwright.sync_api import sync_playwright, Page
 from cf_clearance import sync_cf_retry, sync_stealth
+from playwright.sync_api import sync_playwright, Page
+
 from app.log import logger
 
 
@@ -35,26 +36,41 @@ class PlaywrightHelper:
         :param headless: 是否无头模式
         :param timeout: 超时时间
         """
+        result = None
         try:
             with sync_playwright() as playwright:
-                browser = playwright[self.browser_type].launch(headless=headless)
-                context = browser.new_context(user_agent=ua, proxy=proxies)
-                page = context.new_page()
-                if cookies:
-                    page.set_extra_http_headers({"cookie": cookies})
+                browser = None
+                context = None
+                page = None
                 try:
+                    browser = playwright[self.browser_type].launch(headless=headless)
+                    context = browser.new_context(user_agent=ua, proxy=proxies)
+                    page = context.new_page()
+                    
+                    if cookies:
+                        page.set_extra_http_headers({"cookie": cookies})
+                    
                     if not self.__pass_cloudflare(url, page):
                         logger.warn("cloudflare challenge fail！")
                     page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+                    
                     # 回调函数
-                    return callback(page)
+                    result = callback(page)
+                    
                 except Exception as e:
                     logger.error(f"网页操作失败: {str(e)}")
                 finally:
-                    browser.close()
+                    # 确保资源被正确清理
+                    if page:
+                        page.close()
+                    if context:
+                        context.close()
+                    if browser:
+                        browser.close()
         except Exception as e:
-            logger.error(f"网页操作失败: {str(e)}")
-        return None
+            logger.error(f"Playwright初始化失败: {str(e)}")
+        
+        return result
 
     def get_page_source(self, url: str,
                         cookies: Optional[str] = None,
@@ -71,26 +87,40 @@ class PlaywrightHelper:
         :param headless: 是否无头模式
         :param timeout: 超时时间
         """
-        source = ""
+        source = None
         try:
             with sync_playwright() as playwright:
-                browser = playwright[self.browser_type].launch(headless=headless)
-                context = browser.new_context(user_agent=ua, proxy=proxies)
-                page = context.new_page()
-                if cookies:
-                    page.set_extra_http_headers({"cookie": cookies})
+                browser = None
+                context = None
+                page = None
                 try:
+                    browser = playwright[self.browser_type].launch(headless=headless)
+                    context = browser.new_context(user_agent=ua, proxy=proxies)
+                    page = context.new_page()
+                    
+                    if cookies:
+                        page.set_extra_http_headers({"cookie": cookies})
+                    
                     if not self.__pass_cloudflare(url, page):
                         logger.warn("cloudflare challenge fail！")
                     page.wait_for_load_state("networkidle", timeout=timeout * 1000)
+                    
                     source = page.content()
+                    
                 except Exception as e:
                     logger.error(f"获取网页源码失败: {str(e)}")
                     source = None
                 finally:
-                    browser.close()
+                    # 确保资源被正确清理
+                    if page:
+                        page.close()
+                    if context:
+                        context.close()
+                    if browser:
+                        browser.close()
         except Exception as e:
-            logger.error(f"获取网页源码失败: {str(e)}")
+            logger.error(f"Playwright初始化失败: {str(e)}")
+        
         return source
 
 

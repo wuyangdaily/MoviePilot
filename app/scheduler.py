@@ -15,20 +15,19 @@ from app.chain.mediaserver import MediaServerChain
 from app.chain.recommend import RecommendChain
 from app.chain.site import SiteChain
 from app.chain.subscribe import SubscribeChain
-from app.chain.tmdb import TmdbChain
 from app.chain.transfer import TransferChain
 from app.chain.workflow import WorkflowChain
 from app.core.config import settings
-from app.core.event import EventManager
+from app.core.event import EventManager, eventmanager, Event
 from app.core.plugin import PluginManager
 from app.db.systemconfig_oper import SystemConfigOper
 from app.helper.sites import SitesHelper
+from app.helper.wallpaper import WallpaperHelper
 from app.log import logger
-from app.schemas import Notification, NotificationType, Workflow
+from app.schemas import Notification, NotificationType, Workflow, ConfigChangeEventData
 from app.schemas.types import EventType, SystemConfigKey
 from app.utils.singleton import Singleton
 from app.utils.timer import TimerUtils
-
 
 lock = threading.Lock()
 
@@ -51,8 +50,25 @@ class Scheduler(metaclass=Singleton):
     _jobs = {}
     # 用户认证失败次数
     _auth_count = 0
+    # 用户认证失败消息发送
+    _auth_message = False
 
     def __init__(self):
+        self.init()
+
+    @eventmanager.register(EventType.ConfigChanged)
+    def handle_config_changed(self, event: Event):
+        """
+        处理配置变更事件
+        :param event: 事件对象
+        """
+        if not event:
+            return
+        event_data: ConfigChangeEventData = event.event_data
+        if event_data.key not in ['DEV', 'COOKIECLOUD_INTERVAL', 'MEDIASERVER_SYNC_INTERVAL', 'SUBSCRIBE_SEARCH',
+                                  'SUBSCRIBE_MODE', 'SUBSCRIBE_RSS_INTERVAL', 'SITEDATA_REFRESH_INTERVAL']:
+            return
+        logger.info(f"配置项 {event_data.key} 变更，重新初始化定时服务...")
         self.init()
 
     def init(self):
@@ -133,7 +149,7 @@ class Scheduler(metaclass=Singleton):
                 },
                 "random_wallpager": {
                     "name": "壁纸缓存",
-                    "func": TmdbChain().get_trending_wallpapers,
+                    "func": WallpaperHelper().get_wallpapers,
                     "running": False,
                 },
                 "sitedata_refresh": {
@@ -151,7 +167,7 @@ class Scheduler(metaclass=Singleton):
             # 创建定时服务
             self._scheduler = BackgroundScheduler(timezone=settings.TZ,
                                                   executors={
-                                                      'default': ThreadPoolExecutor(100)
+                                                      'default': ThreadPoolExecutor(settings.CONF['scheduler'])
                                                   })
 
             # CookieCloud定时同步
@@ -308,7 +324,7 @@ class Scheduler(metaclass=Singleton):
                 "interval",
                 id="clear_cache",
                 name="缓存清理",
-                hours=settings.CACHE_CONF["meta"] / 3600,
+                hours=settings.CONF["meta"] / 3600,
                 kwargs={
                     'job_id': 'clear_cache'
                 }
@@ -538,17 +554,18 @@ class Scheduler(metaclass=Singleton):
         self.remove_plugin_job(pid)
         # 获取插件服务列表
         with self._lock:
+            plugin_manager = PluginManager()
             try:
-                plugin_services = PluginManager().get_plugin_services(pid=pid)
+                plugin_services = plugin_manager.get_plugin_services(pid=pid)
             except Exception as e:
                 logger.error(f"运行插件 {pid} 服务失败：{str(e)} - {traceback.format_exc()}")
                 return
             # 获取插件名称
-            plugin_name = PluginManager().get_plugin_attr(pid, "plugin_name")
+            plugin_name = plugin_manager.get_plugin_attr(pid, "plugin_name")
             # 开始注册插件服务
             for service in plugin_services:
                 try:
-                    sid = f"{service['id']}"
+                    sid = f"{pid}_{service['id']}"
                     job_id = sid.split("|")[0]
                     self.remove_plugin_job(pid, job_id)
                     self._jobs[job_id] = {
@@ -586,6 +603,9 @@ class Scheduler(metaclass=Singleton):
             schedulers = []
             # 去重
             added = []
+            # 避免_scheduler.shutdown()处于阻塞状态导致的死锁
+            if not self._scheduler or not self._scheduler.running:
+                return []
             jobs = self._scheduler.get_jobs()
             # 按照下次运行时间排序
             jobs.sort(key=lambda x: x.next_run_time)
@@ -594,8 +614,8 @@ class Scheduler(metaclass=Singleton):
                 name = service.get("name")
                 provider_name = service.get("provider_name")
                 if service.get("running") and name and provider_name:
-                    if name not in added:
-                        added.append(name)
+                    if job_id not in added:
+                        added.append(job_id)
                     schedulers.append(schemas.ScheduleInfo(
                         id=job_id,
                         name=name,
@@ -604,11 +624,11 @@ class Scheduler(metaclass=Singleton):
                     ))
             # 获取其他待执行任务
             for job in jobs:
-                if job.name not in added:
-                    added.append(job.name)
+                job_id = job.id.split("|")[0]
+                if job_id not in added:
+                    added.append(job_id)
                 else:
                     continue
-                job_id = job.id.split("|")[0]
                 service = self._jobs.get(job_id)
                 if not service:
                     continue
@@ -658,9 +678,11 @@ class Scheduler(metaclass=Singleton):
         # 最大重试次数
         __max_try__ = 30
         if self._auth_count > __max_try__:
-            SchedulerChain().messagehelper.put(title=f"用户认证失败",
-                                               message="用户认证失败次数过多，将不再尝试认证！",
-                                               role="system")
+            if not self._auth_message:
+                SchedulerChain().messagehelper.put(title=f"用户认证失败",
+                                                   message="用户认证失败次数过多，将不再尝试认证！",
+                                                   role="system")
+                self._auth_message = True
             return
         logger.info("用户未认证，正在尝试认证...")
         auth_conf = SystemConfigOper().get(SystemConfigKey.UserSiteAuthParams)
@@ -675,10 +697,11 @@ class Scheduler(metaclass=Singleton):
                 Notification(
                     mtype=NotificationType.Manual,
                     title="MoviePilot用户认证成功",
-                    text=f"使用站点：{msg}",
+                    text=f"使用站点：{msg}，如有插件使用异常，请重启MoviePilot。",
                     link=settings.MP_DOMAIN('#/site')
                 )
             )
+            # 认证通过后重新初始化插件
             PluginManager().init_config()
             self.init_plugin_jobs()
 
