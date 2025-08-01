@@ -68,35 +68,57 @@ class SystemUtils:
         """
         if SystemUtils.is_windows():
             return False
-        return True if "synology" in SystemUtils.execute('uname -a') else False
+        return "synology" in SystemUtils.execute('uname -a')
 
     @staticmethod
     def is_windows() -> bool:
         """
         判断是否为Windows系统
         """
-        return True if os.name == "nt" else False
+        return os.name == "nt"
 
     @staticmethod
     def is_frozen() -> bool:
         """
         判断是否为冻结的二进制文件
         """
-        return True if getattr(sys, 'frozen', False) else False
+        return getattr(sys, 'frozen', False)
 
     @staticmethod
     def is_macos() -> bool:
         """
         判断是否为MacOS系统
         """
-        return True if platform.system() == 'Darwin' else False
+        return platform.system() == 'Darwin'
 
     @staticmethod
     def is_aarch64() -> bool:
         """
         判断是否为ARM64架构
         """
-        return True if platform.machine() == 'aarch64' else False
+        return platform.machine().lower() in ('aarch64', 'arm64')
+
+    @staticmethod
+    def is_aarch() -> bool:
+        """
+        判断是否为ARM32架构
+        """
+        arch_name = platform.machine().lower()
+        return arch_name.startswith(('arm', 'aarch')) and arch_name not in ('aarch64', 'arm64')
+
+    @staticmethod
+    def is_x86_64() -> bool:
+        """
+        判断是否为AMD64架构
+        """
+        return platform.machine().lower() in ('amd64', 'x86_64')
+
+    @staticmethod
+    def is_x86_32() -> bool:
+        """
+        判断是否为AMD32架构
+        """
+        return platform.machine().lower() in ('i386', 'i686', 'x86', '386', 'x86_32')
 
     @staticmethod
     def platform() -> str:
@@ -111,6 +133,22 @@ class SystemUtils:
             return "Arm64"
         else:
             return "Linux"
+
+    @staticmethod
+    def cpu_arch() -> str:
+        """
+        获取CPU架构
+        """
+        if SystemUtils.is_x86_64():
+            return "x86_64"
+        elif SystemUtils.is_x86_32():
+            return "x86_32"
+        elif SystemUtils.is_aarch64():
+            return "Arm64"
+        elif SystemUtils.is_aarch():
+            return "Arm32"
+        else:
+            return platform.machine()
 
     @staticmethod
     def copy(src: Path, dest: Path) -> Tuple[int, str]:
@@ -444,6 +482,24 @@ class SystemUtils:
         system_memory = psutil.virtual_memory().total
         process_memory_percent = (process_memory / system_memory) * 100
         return [process_memory, int(process_memory_percent)]
+
+    @staticmethod
+    def network_usage() -> List[int]:
+        """
+        获取当前网络流量（上行和下行流量，单位：bytes/s）
+        """
+        import time
+        # 获取初始网络统计
+        net_io_1 = psutil.net_io_counters()
+        time.sleep(1)  # 等待1秒
+        # 获取1秒后的网络统计
+        net_io_2 = psutil.net_io_counters()
+
+        # 计算1秒内的流量变化
+        upload_speed = net_io_2.bytes_sent - net_io_1.bytes_sent
+        download_speed = net_io_2.bytes_recv - net_io_1.bytes_recv
+
+        return [upload_speed, download_speed]
 
     @staticmethod
     def is_hardlink(src: Path, dest: Path) -> bool:

@@ -21,7 +21,8 @@ from app.core.config import settings
 from app.core.event import EventManager, eventmanager, Event
 from app.core.plugin import PluginManager
 from app.db.systemconfig_oper import SystemConfigOper
-from app.helper.sites import SitesHelper
+from app.helper.message import MessageHelper
+from app.helper.sites import SitesHelper  # noqa
 from app.helper.wallpaper import WallpaperHelper
 from app.log import logger
 from app.schemas import Notification, NotificationType, Workflow, ConfigChangeEventData
@@ -40,20 +41,20 @@ class Scheduler(metaclass=Singleton):
     """
     定时任务管理
     """
-    # 定时服务
-    _scheduler = None
-    # 退出事件
-    _event = threading.Event()
-    # 锁
-    _lock = threading.RLock()
-    # 各服务的运行状态
-    _jobs = {}
-    # 用户认证失败次数
-    _auth_count = 0
-    # 用户认证失败消息发送
-    _auth_message = False
 
     def __init__(self):
+        # 定时服务
+        self._scheduler = None
+        # 退出事件
+        self._event = threading.Event()
+        # 锁
+        self._lock = threading.RLock()
+        # 各服务的运行状态
+        self._jobs = {}
+        # 用户认证失败次数
+        self._auth_count = 0
+        # 用户认证失败消息发送
+        self._auth_message = False
         self.init()
 
     @eventmanager.register(EventType.ConfigChanged)
@@ -167,7 +168,7 @@ class Scheduler(metaclass=Singleton):
             # 创建定时服务
             self._scheduler = BackgroundScheduler(timezone=settings.TZ,
                                                   executors={
-                                                      'default': ThreadPoolExecutor(settings.CONF['scheduler'])
+                                                      'default': ThreadPoolExecutor(settings.CONF.scheduler)
                                                   })
 
             # CookieCloud定时同步
@@ -324,7 +325,7 @@ class Scheduler(metaclass=Singleton):
                 "interval",
                 id="clear_cache",
                 name="缓存清理",
-                hours=settings.CONF["meta"] / 3600,
+                hours=settings.CONF.meta / 3600,
                 kwargs={
                     'job_id': 'clear_cache'
                 }
@@ -380,46 +381,60 @@ class Scheduler(metaclass=Singleton):
             # 启动定时服务
             self._scheduler.start()
 
+    def __prepare_job(self, job_id: str) -> Optional[dict]:
+        """
+        准备定时任务
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return None
+            if job.get("running"):
+                logger.warning(f"定时任务 {job_id} - {job.get("name")} 正在运行 ...")
+                return None
+            self._jobs[job_id]["running"] = True
+        return job
+
+    def __finish_job(self, job_id: str):
+        """
+        完成定时任务
+        """
+        with self._lock:
+            try:
+                self._jobs[job_id]["running"] = False
+            except KeyError:
+                pass
+
     def start(self, job_id: str, *args, **kwargs):
         """
         启动定时服务
         """
-        # 处理job_id格式
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if not job:
-                return
-            job_name = job.get("name")
-            if job.get("running"):
-                logger.warning(f"定时任务 {job_id} - {job_name} 正在运行 ...")
-                return
-            self._jobs[job_id]["running"] = True
+        # 获取定时任务
+        job = self.__prepare_job(job_id)
+        if not job:
+            return
         # 开始运行
         try:
             if not kwargs:
                 kwargs = job.get("kwargs") or {}
             job["func"](*args, **kwargs)
         except Exception as e:
-            logger.error(f"定时任务 {job_name} 执行失败：{str(e)} - {traceback.format_exc()}")
-            SchedulerChain().messagehelper.put(title=f"{job_name} 执行失败",
-                                               message=str(e),
-                                               role="system")
-            EventManager().send_event(
+            logger.error(f"定时任务 {job.get('name')} 执行失败：{str(e)} - {traceback.format_exc()}")
+            MessageHelper().put(title=f"{job.get('name')} 执行失败",
+                                message=str(e),
+                                role="system")
+            eventmanager.send_event(
                 EventType.SystemError,
                 {
                     "type": "scheduler",
                     "scheduler_id": job_id,
-                    "scheduler_name": job_name,
+                    "scheduler_name": job.get('name'),
                     "error": str(e),
                     "traceback": traceback.format_exc()
                 }
             )
         # 运行结束
-        with self._lock:
-            try:
-                self._jobs[job_id]["running"] = False
-            except KeyError:
-                pass
+        self.__finish_job(job_id)
 
     def init_plugin_jobs(self):
         """
@@ -432,7 +447,7 @@ class Scheduler(metaclass=Singleton):
         """
         初始化工作流定时服务
         """
-        for workflow in WorkflowChain().get_workflows() or []:
+        for workflow in WorkflowChain().get_timer_workflows() or []:
             self.update_workflow_job(workflow)
 
     def remove_workflow_job(self, workflow: Workflow):
@@ -443,7 +458,7 @@ class Scheduler(metaclass=Singleton):
             return
         with self._lock:
             job_id = f"workflow-{workflow.id}"
-            service = self._jobs.pop(job_id, None)
+            service = self._jobs.pop(job_id, {})
             if not service:
                 return
             try:

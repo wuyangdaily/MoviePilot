@@ -46,21 +46,20 @@ class PlaywrightHelper:
                     browser = playwright[self.browser_type].launch(headless=headless)
                     context = browser.new_context(user_agent=ua, proxy=proxies)
                     page = context.new_page()
-                    
+
                     if cookies:
                         page.set_extra_http_headers({"cookie": cookies})
-                    
+
                     if not self.__pass_cloudflare(url, page):
                         logger.warn("cloudflare challenge fail！")
                     page.wait_for_load_state("networkidle", timeout=timeout * 1000)
-                    
+
                     # 回调函数
                     result = callback(page)
-                    
+
                 except Exception as e:
                     logger.error(f"网页操作失败: {str(e)}")
                 finally:
-                    # 确保资源被正确清理
                     if page:
                         page.close()
                     if context:
@@ -69,7 +68,7 @@ class PlaywrightHelper:
                         browser.close()
         except Exception as e:
             logger.error(f"Playwright初始化失败: {str(e)}")
-        
+
         return result
 
     def get_page_source(self, url: str,
@@ -97,16 +96,16 @@ class PlaywrightHelper:
                     browser = playwright[self.browser_type].launch(headless=headless)
                     context = browser.new_context(user_agent=ua, proxy=proxies)
                     page = context.new_page()
-                    
+
                     if cookies:
                         page.set_extra_http_headers({"cookie": cookies})
-                    
+
                     if not self.__pass_cloudflare(url, page):
                         logger.warn("cloudflare challenge fail！")
                     page.wait_for_load_state("networkidle", timeout=timeout * 1000)
-                    
+
                     source = page.content()
-                    
+
                 except Exception as e:
                     logger.error(f"获取网页源码失败: {str(e)}")
                     source = None
@@ -120,7 +119,7 @@ class PlaywrightHelper:
                         browser.close()
         except Exception as e:
             logger.error(f"Playwright初始化失败: {str(e)}")
-        
+
         return source
 
 

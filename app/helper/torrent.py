@@ -1,10 +1,9 @@
 import datetime
 import re
 from pathlib import Path
-from typing import Tuple, Optional, List, Union, Dict
+from typing import Tuple, Optional, List, Union, Dict, Any
 from urllib.parse import unquote
 
-from requests import Response
 from torrentool.api import Torrent
 
 from app.core.config import settings
@@ -16,17 +15,17 @@ from app.db.systemconfig_oper import SystemConfigOper
 from app.log import logger
 from app.schemas.types import MediaType, SystemConfigKey
 from app.utils.http import RequestUtils
-from app.utils.singleton import Singleton
+from app.utils.singleton import WeakSingleton
 from app.utils.string import StringUtils
 
 
-class TorrentHelper(metaclass=Singleton):
+class TorrentHelper(metaclass=WeakSingleton):
     """
     种子帮助类
     """
 
-    # 失败的种子：站点链接
-    _invalid_torrents = []
+    def __init__(self):
+        self._invalid_torrents = []
 
     def download_torrent(self, url: str,
                          cookie: Optional[str] = None,
@@ -40,6 +39,22 @@ class TorrentHelper(metaclass=Singleton):
         """
         if url.startswith("magnet:"):
             return None, url, "", [], f"磁力链接"
+        # 构建 torrent 种子文件的存储路径
+        file_path = (Path(settings.TEMP_PATH) / StringUtils.md5_hash(url)).with_suffix(".torrent")
+        if file_path.exists():
+            try:
+                # 获取种子目录和文件清单
+                folder_name, file_list = self.get_torrent_info(file_path)
+                # 无法获取信息，则认为缓存文件无效
+                if not folder_name and not file_list:
+                    raise ValueError("无效的缓存种子文件")
+                # 获取种子数据
+                content = file_path.read_bytes()
+                # 成功拿到种子数据
+                return file_path, content, folder_name, file_list, ""
+            except Exception as err:
+                logger.error(f"处理缓存的种子文件 {file_path} 时出错: {err}，将重新下载")
+                file_path.unlink(missing_ok=True)
         # 请求种子文件
         req = RequestUtils(
             ua=ua,
@@ -106,10 +121,6 @@ class TorrentHelper(metaclass=Singleton):
             if req.content:
                 # 检查是不是种子文件，如果不是仍然抛出异常
                 try:
-                    # 读取种子文件名
-                    file_name = self.get_url_filename(req, url)
-                    # 种子文件路径
-                    file_path = Path(settings.TEMP_PATH) / file_name
                     # 保存到文件
                     file_path.write_bytes(req.content)
                     # 获取种子目录和文件清单
@@ -170,7 +181,7 @@ class TorrentHelper(metaclass=Singleton):
             return "", []
 
     @staticmethod
-    def get_url_filename(req: Response, url: str) -> str:
+    def get_url_filename(req: Any, url: str) -> str:
         """
         从下载请求中获取种子文件名
         """
@@ -308,7 +319,7 @@ class TorrentHelper(metaclass=Singleton):
             self._invalid_torrents.append(url)
 
     @staticmethod
-    def match_torrent(mediainfo: MediaInfo, torrent_meta: MetaInfo, torrent: TorrentInfo) -> bool:
+    def match_torrent(mediainfo: MediaInfo, torrent_meta: MetaBase, torrent: TorrentInfo) -> bool:
         """
         检查种子是否匹配媒体信息
         :param mediainfo: 需要匹配的媒体信息

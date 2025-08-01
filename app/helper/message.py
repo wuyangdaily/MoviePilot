@@ -183,6 +183,8 @@ class TemplateContextBuilder:
             "videoCodec": meta.video_encode,
             # 音频编码
             "audioCodec": meta.audio_encode,
+            # 流媒体平台
+            "webSource": meta.web_source,
         }
         self._context.update({**meta_info, **tech_metadata, **episode_data})
 
@@ -539,8 +541,6 @@ class MessageQueueManager(metaclass=SingletonClass):
     消息发送队列管理器
     """
 
-    schedule_periods: List[tuple[int, int, int, int]] = []
-
     def __init__(
             self,
             send_callback: Optional[Callable] = None,
@@ -552,6 +552,8 @@ class MessageQueueManager(metaclass=SingletonClass):
         :param send_callback: 实际发送消息的回调函数
         :param check_interval: 时间检查间隔（秒）
         """
+        self.schedule_periods: List[tuple[int, int, int, int]] = []
+
         self.init_config()
 
         self.queue: queue.Queue[Any] = queue.Queue()

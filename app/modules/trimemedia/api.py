@@ -111,7 +111,7 @@ class Api:
         "_api_path",
         "_request_utils",
         "_version",
-        "_session"
+        "_session",
     )
 
     @property
@@ -287,6 +287,18 @@ class Api:
                 return True
         return False
 
+    def task_running(self):
+        """
+        当前正在运行的任务
+        """
+        if (
+            res := self.__request_api("/task/running")
+        ) and res.success:
+            if res.data:
+                # TODO 具体正在运行的任务
+                return True
+        return False
+
     def __build_item(self, info: dict) -> Item:
         """
         构造媒体Item
@@ -308,7 +320,7 @@ class Api:
         types=None,
         exclude_grouped_video=True,
         page=1,
-        page_size=22,
+        page_size=20,
         sort_by="create_time",
         sort="DESC",
     ) -> Optional[list[Item]]:

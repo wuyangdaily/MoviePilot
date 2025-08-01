@@ -8,7 +8,7 @@ from lxml import etree
 
 from app.chain import ChainBase
 from app.core.config import global_vars, settings
-from app.core.event import Event, EventManager, eventmanager
+from app.core.event import Event, eventmanager
 from app.db.models.site import Site
 from app.db.site_oper import SiteOper
 from app.db.systemconfig_oper import SystemConfigOper
@@ -17,7 +17,7 @@ from app.helper.cloudflare import under_challenge
 from app.helper.cookie import CookieHelper
 from app.helper.cookiecloud import CookieCloudHelper
 from app.helper.rss import RssHelper
-from app.helper.sites import SitesHelper
+from app.helper.sites import SitesHelper  # noqa
 from app.log import logger
 from app.schemas import MessageChannel, Notification, SiteUserData
 from app.schemas.types import EventType, NotificationType
@@ -58,7 +58,7 @@ class SiteChain(ChainBase):
                                        name=site.get("name"),
                                        payload=userdata.dict())
             # 发送事件
-            EventManager().send_event(EventType.SiteRefreshed, {
+            eventmanager.send_event(EventType.SiteRefreshed, {
                 "site_id": site.get("id")
             })
             # 发送站点消息
@@ -92,10 +92,9 @@ class SiteChain(ChainBase):
         """
         刷新所有站点的用户数据
         """
-        sites = SitesHelper().get_indexers()
         any_site_updated = False
         result = {}
-        for site in sites:
+        for site in SitesHelper().get_indexers():
             if global_vars.is_system_stopped:
                 return None
             if site.get("is_active"):
@@ -104,9 +103,10 @@ class SiteChain(ChainBase):
                     any_site_updated = True
                     result[site.get("name")] = userdata
         if any_site_updated:
-            EventManager().send_event(EventType.SiteRefreshed, {
+            eventmanager.send_event(EventType.SiteRefreshed, {
                 "site_id": "*"
             })
+
         return result
 
     def is_special_site(self, domain: str) -> bool:
@@ -266,16 +266,20 @@ class SiteChain(ChainBase):
             logger.error(f"获取站点页面失败：{url}")
             return favicon_url, None
         html = etree.HTML(html_text)
-        if StringUtils.is_valid_html_element(html):
-            fav_link = html.xpath('//head/link[contains(@rel, "icon")]/@href')
-            if fav_link:
-                favicon_url = urljoin(url, fav_link[0])
+        try:
+            if StringUtils.is_valid_html_element(html):
+                fav_link = html.xpath('//head/link[contains(@rel, "icon")]/@href')
+                if fav_link:
+                    favicon_url = urljoin(url, fav_link[0])
 
-        res = RequestUtils(cookies=cookie, timeout=15, ua=ua).get_res(url=favicon_url)
-        if res:
-            return favicon_url, base64.b64encode(res.content).decode()
-        else:
-            logger.error(f"获取站点图标失败：{favicon_url}")
+            res = RequestUtils(cookies=cookie, timeout=15, ua=ua).get_res(url=favicon_url)
+            if res:
+                return favicon_url, base64.b64encode(res.content).decode()
+            else:
+                logger.error(f"获取站点图标失败：{favicon_url}")
+        finally:
+            if html is not None:
+                del html
         return favicon_url, None
 
     def sync_cookies(self, manual=False) -> Tuple[bool, str]:
@@ -351,9 +355,10 @@ class SiteChain(ChainBase):
                                    ua=settings.USER_AGENT
                                    ).get_res(url=domain_url)
                 if res and res.status_code in [200, 500, 403]:
-                    if not indexer.get("public") and not SiteUtils.is_logged_in(res.text):
+                    content = res.text
+                    if not indexer.get("public") and not SiteUtils.is_logged_in(content):
                         _fail_count += 1
-                        if under_challenge(res.text):
+                        if under_challenge(content):
                             logger.warn(f"站点 {indexer.get('name')} 被Cloudflare防护，无法登录，无法添加站点")
                             continue
                         logger.warn(
@@ -410,7 +415,7 @@ class SiteChain(ChainBase):
 
             # 通知站点更新
             if indexer:
-                EventManager().send_event(EventType.SiteUpdated, {
+                eventmanager.send_event(EventType.SiteUpdated, {
                     "domain": domain,
                 })
         # 处理完成
@@ -571,8 +576,9 @@ class SiteChain(ChainBase):
                                ).get_res(url=site_url)
             # 判断登录状态
             if res and res.status_code in [200, 500, 403]:
-                if not public and not SiteUtils.is_logged_in(res.text):
-                    if under_challenge(res.text):
+                content = res.text
+                if not public and not SiteUtils.is_logged_in(content):
+                    if under_challenge(content):
                         msg = "站点被Cloudflare防护，请打开站点浏览器仿真"
                     elif res.status_code == 200:
                         msg = "Cookie已失效"

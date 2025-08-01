@@ -1,6 +1,8 @@
 import copy
 import json
 import os
+import platform
+import re
 import secrets
 import sys
 import threading
@@ -11,8 +13,38 @@ from dotenv import set_key
 from pydantic import BaseModel, BaseSettings, validator, Field
 
 from app.log import logger, log_settings, LogConfigModel
+from app.schemas import MediaType
 from app.utils.system import SystemUtils
 from app.utils.url import UrlUtils
+from version import APP_VERSION
+
+
+class SystemConfModel(BaseModel):
+    """
+    系统关键资源大小配置
+    """
+    # 缓存种子数量
+    torrents: int = 0
+    # 订阅刷新处理数量
+    refresh: int = 0
+    # TMDB请求缓存数量
+    tmdb: int = 0
+    # 豆瓣请求缓存数量
+    douban: int = 0
+    # Bangumi请求缓存数量
+    bangumi: int = 0
+    # Fanart请求缓存数量
+    fanart: int = 0
+    # 元数据缓存过期时间（秒）
+    meta: int = 0
+    # 调度器数量
+    scheduler: int = 0
+    # 线程池大小
+    threadpool: int = 0
+    # 数据库连接池大小
+    dbpool: int = 0
+    # 数据库连接池溢出数量
+    dbpooloverflow: int = 0
 
 
 class ConfigModel(BaseModel):
@@ -57,16 +89,12 @@ class ConfigModel(BaseModel):
     DB_ECHO: bool = False
     # 数据库连接池类型，QueuePool, NullPool
     DB_POOL_TYPE: str = "QueuePool"
-    # 是否在获取连接时进行预先 ping 操作，默认关闭
-    DB_POOL_PRE_PING: bool = False
-    # 数据库连接池的大小，默认 100
-    DB_POOL_SIZE: int = 100
-    # 数据库连接的回收时间（秒），默认 1800 秒
-    DB_POOL_RECYCLE: int = 1800
-    # 数据库连接池获取连接的超时时间（秒），默认 60 秒
-    DB_POOL_TIMEOUT: int = 60
-    # 数据库连接池最大溢出连接数，默认 500
-    DB_MAX_OVERFLOW: int = 500
+    # 是否在获取连接时进行预先 ping 操作
+    DB_POOL_PRE_PING: bool = True
+    # 数据库连接的回收时间（秒）
+    DB_POOL_RECYCLE: int = 300
+    # 数据库连接池获取连接的超时时间（秒）
+    DB_POOL_TIMEOUT: int = 30
     # SQLite 的 busy_timeout 参数，默认为 60 秒
     DB_TIMEOUT: int = 60
     # SQLite 是否启用 WAL 模式，默认开启
@@ -183,10 +211,14 @@ class ConfigModel(BaseModel):
     LOCAL_EXISTS_SEARCH: bool = False
     # 搜索多个名称
     SEARCH_MULTIPLE_NAME: bool = False
+    # 最大搜索名称数量
+    MAX_SEARCH_NAME_LIMIT: int = 2
     # 站点数据刷新间隔（小时）
     SITEDATA_REFRESH_INTERVAL: int = 6
     # 读取和发送站点消息
     SITE_MESSAGE: bool = True
+    # 不能缓存站点资源的站点域名，多个使用,分隔
+    NO_CACHE_SITE_KEY: str = "m-team"
     # 种子标签
     TORRENT_TAG: str = "MOVIEPILOT"
     # 下载站点字幕
@@ -205,8 +237,6 @@ class ConfigModel(BaseModel):
     COOKIECLOUD_INTERVAL: Optional[int] = 60 * 24
     # CookieCloud同步黑名单，多个域名,分割
     COOKIECLOUD_BLACKLIST: Optional[str] = None
-    # CookieCloud对应的浏览器UA
-    USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36 Edg/113.0.1774.57"
     # 电影重命名格式
     MOVIE_RENAME_FORMAT: str = "{{title}}{% if year %} ({{year}}){% endif %}" \
                                "/{{title}}{% if year %} ({{year}}){% endif %}{% if part %}-{{part}}{% endif %}{% if videoFormat %} - {{videoFormat}}{% endif %}" \
@@ -250,12 +280,8 @@ class ConfigModel(BaseModel):
     REPO_GITHUB_TOKEN: Optional[str] = None
     # 大内存模式
     BIG_MEMORY_MODE: bool = False
-    # 是否启用内存监控
-    MEMORY_ANALYSIS: bool = False
-    # 内存快照间隔（分钟）
-    MEMORY_SNAPSHOT_INTERVAL: int = 60
-    # 保留的内存快照文件数量
-    MEMORY_SNAPSHOT_KEEP_COUNT: int = 20
+    # FastApi性能监控
+    PERFORMANCE_MONITOR_ENABLE: bool = False
     # 全局图片缓存，将媒体图片缓存到本地
     GLOBAL_IMAGE_CACHE: bool = False
     # 是否启用编码探测的性能模式
@@ -287,6 +313,12 @@ class ConfigModel(BaseModel):
     DEFAULT_SUB: Optional[str] = "zh-cn"
     # Docker Client API地址
     DOCKER_CLIENT_API: Optional[str] = "tcp://127.0.0.1:38379"
+    # 工作流数据共享
+    WORKFLOW_STATISTIC_SHARE: bool = True
+    # 对rclone进行快照对比时，是否检查文件夹的修改时间
+    RCLONE_SNAPSHOT_CHECK_FOLDER_MODTIME = True
+    # 对OpenList进行快照对比时，是否检查文件夹的修改时间
+    OPENLIST_SNAPSHOT_CHECK_FOLDER_MODTIME = True
 
 
 class Settings(BaseSettings, ConfigModel, LogConfigModel):
@@ -487,6 +519,20 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         return "v2"
 
     @property
+    def USER_AGENT(self) -> str:
+        """
+        全局用户代理字符串
+        """
+        return f"{self.PROJECT_NAME}/{APP_VERSION[1:]} ({platform.system()} {platform.release()}; {SystemUtils.cpu_arch()})"
+
+    @property
+    def NORMAL_USER_AGENT(self) -> str:
+        """
+        默认浏览器用户代理字符串
+        """
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+
+    @property
     def INNER_CONFIG_PATH(self):
         return self.ROOT_PATH / "config"
 
@@ -525,43 +571,37 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         return self.CONFIG_PATH / "cookies"
 
     @property
-    def CONF(self):
+    def CONF(self) -> SystemConfModel:
         """
-        {
-            "torrents": "缓存种子数量",
-            "refresh": "订阅刷新处理数量",
-            "tmdb": "TMDB请求缓存数量",
-            "douban": "豆瓣请求缓存数量",
-            "fanart": "Fanart请求缓存数量",
-            "meta": "元数据缓存过期时间（秒）",
-            "memory": "最大占用内存（MB）",
-            "scheduler": "调度器缓存数量"
-            "threadpool": "线程池数量"
-        }
+        根据内存模式返回系统配置
         """
         if self.BIG_MEMORY_MODE:
-            return {
-                "torrents": 200,
-                "refresh": 100,
-                "tmdb": 1024,
-                "douban": 512,
-                "bangumi": 512,
-                "fanart": 512,
-                "meta": (self.META_CACHE_EXPIRE or 24) * 3600,
-                "scheduler": 100,
-                "threadpool": 100
-            }
-        return {
-            "torrents": 100,
-            "refresh": 50,
-            "tmdb": 256,
-            "douban": 256,
-            "bangumi": 256,
-            "fanart": 128,
-            "meta": (self.META_CACHE_EXPIRE or 2) * 3600,
-            "scheduler": 50,
-            "threadpool": 50
-        }
+            return SystemConfModel(
+                torrents=200,
+                refresh=100,
+                tmdb=1024,
+                douban=512,
+                bangumi=512,
+                fanart=512,
+                meta=(self.META_CACHE_EXPIRE or 24) * 3600,
+                scheduler=100,
+                threadpool=100,
+                dbpool=100,
+                dbpooloverflow=50
+            )
+        return SystemConfModel(
+            torrents=100,
+            refresh=50,
+            tmdb=256,
+            douban=256,
+            bangumi=256,
+            fanart=128,
+            meta=(self.META_CACHE_EXPIRE or 2) * 3600,
+            scheduler=50,
+            threadpool=50,
+            dbpool=50,
+            dbpooloverflow=20
+        )
 
     @property
     def PROXY(self):
@@ -588,7 +628,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         if self.GITHUB_TOKEN:
             return {
                 "Authorization": f"Bearer {self.GITHUB_TOKEN}",
-                "User-Agent": self.USER_AGENT,
+                "User-Agent": self.NORMAL_USER_AGENT,
             }
         return {}
 
@@ -617,7 +657,7 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
                     continue
                 headers[repo_info] = {
                     "Authorization": f"Bearer {token}",
-                    "User-Agent": self.USER_AGENT,
+                    "User-Agent": self.NORMAL_USER_AGENT,
                 }
             except Exception as e:
                 print(f"处理令牌对 '{token_pair}' 时出错: {e}")
@@ -636,6 +676,23 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         if not self.APP_DOMAIN:
             return None
         return UrlUtils.combine_url(host=self.APP_DOMAIN, path=url)
+
+    def RENAME_FORMAT(self, media_type: MediaType):
+        """
+        获取指定类型的重命名格式
+
+        :param media_type: MediaType.TV 或 MediaType.Movie
+        :return: 重命名格式
+        """
+        rename_format = (
+            self.TV_RENAME_FORMAT
+            if media_type == MediaType.TV
+            else self.MOVIE_RENAME_FORMAT
+        )
+        # 规范重命名格式
+        rename_format = rename_format.replace("\\", "/")
+        rename_format = re.sub(r'/+', '/', rename_format)
+        return rename_format.strip("/")
 
 
 # 实例化配置

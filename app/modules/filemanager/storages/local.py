@@ -44,7 +44,7 @@ class LocalStorage(StorageBase):
         return schemas.FileItem(
             storage=self.schema.value,
             type="file",
-            path=str(path).replace("\\", "/"),
+            path=path.as_posix(),
             name=path.name,
             basename=path.stem,
             extension=path.suffix[1:],
@@ -59,7 +59,7 @@ class LocalStorage(StorageBase):
         return schemas.FileItem(
             storage=self.schema.value,
             type="dir",
-            path=str(path).replace("\\", "/") + "/",
+            path=path.as_posix() + "/",
             name=path.name,
             basename=path.stem,
             modify_time=path.stat().st_mtime,
@@ -191,7 +191,8 @@ class LocalStorage(StorageBase):
         """
         return Path(fileitem.path)
 
-    def upload(self, fileitem: schemas.FileItem, path: Path, new_name: Optional[str] = None) -> Optional[schemas.FileItem]:
+    def upload(self, fileitem: schemas.FileItem, path: Path,
+               new_name: Optional[str] = None) -> Optional[schemas.FileItem]:
         """
         上传文件
         :param fileitem: 上传目录项
@@ -260,8 +261,11 @@ class LocalStorage(StorageBase):
         """
         存储使用情况
         """
-        library_dirs = DirectoryHelper().get_local_library_dirs()
-        total_storage, free_storage = SystemUtils.space_usage([Path(d.library_path) for d in library_dirs])
+        directory_helper = DirectoryHelper()
+        total_storage, free_storage = SystemUtils.space_usage(
+            [Path(d.download_path) for d in directory_helper.get_local_download_dirs() if d.download_path] +
+            [Path(d.library_path) for d in directory_helper.get_local_library_dirs() if d.library_path]
+        )
         return schemas.StorageUsage(
             total=total_storage,
             available=free_storage

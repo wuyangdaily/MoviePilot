@@ -1,10 +1,11 @@
 import time
 from typing import Optional
 
-from sqlalchemy import Column, Integer, String, Sequence, JSON, or_
+from sqlalchemy import Column, Integer, String, Sequence, JSON, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.db import db_query, db_update, Base
+from app.db import db_query, db_update, Base, async_db_query
 
 
 class DownloadHistory(Base):
@@ -55,106 +56,109 @@ class DownloadHistory(Base):
     # 剧集组
     episode_group = Column(String)
 
-    @staticmethod
+    @classmethod
     @db_query
-    def get_by_hash(db: Session, download_hash: str):
+    def get_by_hash(cls, db: Session, download_hash: str):
         return db.query(DownloadHistory).filter(DownloadHistory.download_hash == download_hash).order_by(
             DownloadHistory.date.desc()
         ).first()
 
-    @staticmethod
+    @classmethod
     @db_query
-    def get_by_mediaid(db: Session, tmdbid: int, doubanid: str):
+    def get_by_mediaid(cls, db: Session, tmdbid: int, doubanid: str):
         if tmdbid:
             return db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid).all()
         elif doubanid:
             return db.query(DownloadHistory).filter(DownloadHistory.doubanid == doubanid).all()
         return []
 
-    @staticmethod
+    @classmethod
     @db_query
-    def list_by_page(db: Session, page: Optional[int] = 1, count: Optional[int] = 30):
-        result = db.query(DownloadHistory).offset((page - 1) * count).limit(count).all()
-        return list(result)
+    def list_by_page(cls, db: Session, page: Optional[int] = 1, count: Optional[int] = 30):
+        return db.query(DownloadHistory).offset((page - 1) * count).limit(count).all()
 
-    @staticmethod
+    @classmethod
+    @async_db_query
+    async def async_list_by_page(cls, db: AsyncSession, page: Optional[int] = 1, count: Optional[int] = 30):
+        result = await db.execute(
+            select(cls).offset((page - 1) * count).limit(count)
+        )
+        return result.scalars().all()
+
+    @classmethod
     @db_query
-    def get_by_path(db: Session, path: str):
+    def get_by_path(cls, db: Session, path: str):
         return db.query(DownloadHistory).filter(DownloadHistory.path == path).first()
 
-    @staticmethod
+    @classmethod
     @db_query
-    def get_last_by(db: Session, mtype: Optional[str] = None, title: Optional[str] = None,
+    def get_last_by(cls, db: Session, mtype: Optional[str] = None, title: Optional[str] = None,
                     year: Optional[str] = None, season: Optional[str] = None,
                     episode: Optional[str] = None, tmdbid: Optional[int] = None):
         """
         据tmdbid、season、season_episode查询下载记录
         tmdbid + mtype 或 title + year
         """
-        result = None
         # TMDBID + 类型
         if tmdbid and mtype:
             # 电视剧某季某集
             if season and episode:
-                result = db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
-                                                          DownloadHistory.type == mtype,
-                                                          DownloadHistory.seasons == season,
-                                                          DownloadHistory.episodes == episode).order_by(
+                return db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
+                                                        DownloadHistory.type == mtype,
+                                                        DownloadHistory.seasons == season,
+                                                        DownloadHistory.episodes == episode).order_by(
                     DownloadHistory.id.desc()).all()
             # 电视剧某季
             elif season:
-                result = db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
-                                                          DownloadHistory.type == mtype,
-                                                          DownloadHistory.seasons == season).order_by(
+                return db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
+                                                        DownloadHistory.type == mtype,
+                                                        DownloadHistory.seasons == season).order_by(
                     DownloadHistory.id.desc()).all()
             else:
                 # 电视剧所有季集/电影
-                result = db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
-                                                          DownloadHistory.type == mtype).order_by(
+                return db.query(DownloadHistory).filter(DownloadHistory.tmdbid == tmdbid,
+                                                        DownloadHistory.type == mtype).order_by(
                     DownloadHistory.id.desc()).all()
         # 标题 + 年份
         elif title and year:
             # 电视剧某季某集
             if season and episode:
-                result = db.query(DownloadHistory).filter(DownloadHistory.title == title,
-                                                          DownloadHistory.year == year,
-                                                          DownloadHistory.seasons == season,
-                                                          DownloadHistory.episodes == episode).order_by(
+                return db.query(DownloadHistory).filter(DownloadHistory.title == title,
+                                                        DownloadHistory.year == year,
+                                                        DownloadHistory.seasons == season,
+                                                        DownloadHistory.episodes == episode).order_by(
                     DownloadHistory.id.desc()).all()
             # 电视剧某季
             elif season:
-                result = db.query(DownloadHistory).filter(DownloadHistory.title == title,
-                                                          DownloadHistory.year == year,
-                                                          DownloadHistory.seasons == season).order_by(
+                return db.query(DownloadHistory).filter(DownloadHistory.title == title,
+                                                        DownloadHistory.year == year,
+                                                        DownloadHistory.seasons == season).order_by(
                     DownloadHistory.id.desc()).all()
             else:
                 # 电视剧所有季集/电影
-                result = db.query(DownloadHistory).filter(DownloadHistory.title == title,
-                                                          DownloadHistory.year == year).order_by(
+                return db.query(DownloadHistory).filter(DownloadHistory.title == title,
+                                                        DownloadHistory.year == year).order_by(
                     DownloadHistory.id.desc()).all()
 
-        if result:
-            return list(result)
         return []
 
-    @staticmethod
+    @classmethod
     @db_query
-    def list_by_user_date(db: Session, date: str, username: Optional[str] = None):
+    def list_by_user_date(cls, db: Session, date: str, username: Optional[str] = None):
         """
         查询某用户某时间之后的下载历史
         """
         if username:
-            result = db.query(DownloadHistory).filter(DownloadHistory.date < date,
-                                                      DownloadHistory.username == username).order_by(
+            return db.query(DownloadHistory).filter(DownloadHistory.date < date,
+                                                    DownloadHistory.username == username).order_by(
                 DownloadHistory.id.desc()).all()
         else:
-            result = db.query(DownloadHistory).filter(DownloadHistory.date < date).order_by(
+            return db.query(DownloadHistory).filter(DownloadHistory.date < date).order_by(
                 DownloadHistory.id.desc()).all()
-        return list(result)
 
-    @staticmethod
+    @classmethod
     @db_query
-    def list_by_date(db: Session, date: str, type: str, tmdbid: str, seasons: Optional[str] = None):
+    def list_by_date(cls, db: Session, date: str, type: str, tmdbid: str, seasons: Optional[str] = None):
         """
         查询某时间之后的下载历史
         """
@@ -170,15 +174,14 @@ class DownloadHistory(Base):
                                                     DownloadHistory.tmdbid == tmdbid).order_by(
                 DownloadHistory.id.desc()).all()
 
-    @staticmethod
+    @classmethod
     @db_query
-    def list_by_type(db: Session, mtype: str, days: int):
-        result = db.query(DownloadHistory) \
+    def list_by_type(cls, db: Session, mtype: str, days: int):
+        return db.query(DownloadHistory) \
             .filter(DownloadHistory.type == mtype,
                     DownloadHistory.date >= time.strftime("%Y-%m-%d %H:%M:%S",
                                                           time.localtime(time.time() - 86400 * int(days)))
                     ).all()
-        return list(result)
 
 
 class DownloadFiles(Base):
@@ -201,38 +204,35 @@ class DownloadFiles(Base):
     # 状态 0-已删除 1-正常
     state = Column(Integer, nullable=False, default=1)
 
-    @staticmethod
+    @classmethod
     @db_query
-    def get_by_hash(db: Session, download_hash: str, state: Optional[int] = None):
+    def get_by_hash(cls, db: Session, download_hash: str, state: Optional[int] = None):
         if state:
-            result = db.query(DownloadFiles).filter(DownloadFiles.download_hash == download_hash,
-                                                    DownloadFiles.state == state).all()
+            return db.query(cls).filter(cls.download_hash == download_hash,
+                                        cls.state == state).all()
         else:
-            result = db.query(DownloadFiles).filter(DownloadFiles.download_hash == download_hash).all()
+            return db.query(cls).filter(cls.download_hash == download_hash).all()
 
-        return list(result)
-
-    @staticmethod
+    @classmethod
     @db_query
-    def get_by_fullpath(db: Session, fullpath: str, all_files: bool = False):
+    def get_by_fullpath(cls, db: Session, fullpath: str, all_files: bool = False):
         if not all_files:
-            return db.query(DownloadFiles).filter(DownloadFiles.fullpath == fullpath).order_by(
-                DownloadFiles.id.desc()).first()
+            return db.query(cls).filter(cls.fullpath == fullpath).order_by(
+                cls.id.desc()).first()
         else:
-            return db.query(DownloadFiles).filter(DownloadFiles.fullpath == fullpath).order_by(
-                DownloadFiles.id.desc()).all()
+            return db.query(cls).filter(cls.fullpath == fullpath).order_by(
+                cls.id.desc()).all()
 
-    @staticmethod
+    @classmethod
     @db_query
-    def get_by_savepath(db: Session, savepath: str):
-        result = db.query(DownloadFiles).filter(DownloadFiles.savepath == savepath).all()
-        return list(result)
+    def get_by_savepath(cls, db: Session, savepath: str):
+        return db.query(cls).filter(cls.savepath == savepath).all()
 
-    @staticmethod
+    @classmethod
     @db_update
-    def delete_by_fullpath(db: Session, fullpath: str):
-        db.query(DownloadFiles).filter(DownloadFiles.fullpath == fullpath,
-                                       DownloadFiles.state == 1).update(
+    def delete_by_fullpath(cls, db: Session, fullpath: str):
+        db.query(cls).filter(cls.fullpath == fullpath,
+                             cls.state == 1).update(
             {
                 "state": 0
             }

@@ -8,11 +8,14 @@ from app import schemas
 from app.chain.media import MediaChain
 from app.chain.storage import StorageChain
 from app.chain.transfer import TransferChain
+from app.core.config import settings
 from app.core.metainfo import MetaInfoPath
 from app.core.security import verify_token, verify_apitoken
 from app.db import get_db
+from app.db.models import User
 from app.db.models.transferhistory import TransferHistory
 from app.db.user_oper import get_current_active_superuser
+from app.helper.directory import DirectoryHelper
 from app.schemas import MediaType, FileItem, ManualTransferItem
 
 router = APIRouter()
@@ -35,11 +38,19 @@ def query_name(path: str, filetype: str,
     if not new_path:
         return schemas.Response(success=False, message="未识别到新名称")
     if filetype == "dir":
-        parents = Path(new_path).parents
-        if len(parents) > 2:
-            new_name = parents[1].name
+        media_path = DirectoryHelper.get_media_root_path(
+            rename_format=settings.RENAME_FORMAT(mediainfo.type),
+            rename_path=Path(new_path),
+        )
+        if media_path:
+            new_name = media_path.name
         else:
-            new_name = parents[0].name
+            # fallback
+            parents = Path(new_path).parents
+            if len(parents) > 2:
+                new_name = parents[1].name
+            else:
+                new_name = parents[0].name
     else:
         new_name = Path(new_path).name
     return schemas.Response(success=True, data={
@@ -71,7 +82,7 @@ def remove_queue(fileitem: schemas.FileItem, _: schemas.TokenPayload = Depends(v
 def manual_transfer(transer_item: ManualTransferItem,
                     background: Optional[bool] = False,
                     db: Session = Depends(get_db),
-                    _: schemas.TokenPayload = Depends(get_current_active_superuser)) -> Any:
+                    _: User = Depends(get_current_active_superuser)) -> Any:
     """
     手动转移，文件或历史记录，支持自定义剧集识别格式
     :param transer_item: 手工整理项

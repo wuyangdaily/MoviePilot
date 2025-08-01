@@ -110,11 +110,17 @@ class StorageChain(ChainBase):
         """
         return self.run_module("get_parent_item", fileitem=fileitem)
 
-    def snapshot_storage(self, storage: str, path: Path) -> Optional[Dict[str, float]]:
+    def snapshot_storage(self, storage: str, path: Path,
+                         last_snapshot_time: float = None, max_depth: int = 5) -> Optional[Dict[str, Dict]]:
         """
         快照存储
+        :param storage: 存储类型
+        :param path: 路径
+        :param last_snapshot_time: 上次快照时间，用于增量快照
+        :param max_depth: 最大递归深度，避免过深遍历
         """
-        return self.run_module("snapshot_storage", storage=storage, path=path)
+        return self.run_module("snapshot_storage", storage=storage, path=path,
+                               last_snapshot_time=last_snapshot_time, max_depth=max_depth)
 
     def storage_usage(self, storage: str) -> Optional[schemas.StorageUsage]:
         """
@@ -172,15 +178,14 @@ class StorageChain(ChainBase):
 
         if mtype:
             # 重命名格式
-            rename_format = settings.TV_RENAME_FORMAT \
-                if mtype == MediaType.TV else settings.MOVIE_RENAME_FORMAT
-            # 计算重命名中的文件夹层数
-            rename_format_level = len(rename_format.split("/")) - 1
-            if rename_format_level < 1:
+            rename_format = settings.RENAME_FORMAT(mtype)
+            media_path = DirectoryHelper.get_media_root_path(
+                rename_format, rename_path=Path(fileitem.path)
+            )
+            if not media_path:
                 return True
             # 处理媒体文件根目录
-            dir_item = self.get_file_item(storage=fileitem.storage,
-                                          path=Path(fileitem.path).parents[rename_format_level - 1])
+            dir_item = self.get_file_item(storage=fileitem.storage, path=media_path)
         else:
             # 处理上级目录
             dir_item = self.get_parent_item(fileitem)

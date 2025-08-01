@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import setproctitle
 import signal
 import sys
 import threading
@@ -19,9 +20,12 @@ if SystemUtils.is_frozen():
 from app.core.config import settings
 from app.db.init import init_db, update_db
 
+# 设置进程名
+setproctitle.setproctitle(settings.PROJECT_NAME)
+
 # uvicorn服务
 Server = uvicorn.Server(Config(app, host=settings.HOST, port=settings.PORT,
-                               reload=settings.DEV, workers=multiprocessing.cpu_count(),
+                               reload=settings.DEV, workers=multiprocessing.cpu_count() * 2 + 1,
                                timeout_graceful_shutdown=60))
 
 
@@ -83,7 +87,7 @@ if __name__ == '__main__':
     # 注册信号处理器
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     # 启动托盘
     start_tray()
     # 初始化数据库

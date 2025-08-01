@@ -131,7 +131,7 @@ class CacheToolsBackend(CacheBackend):
     - 不支持按 `key` 独立隔离 TTL 和 Maxsize，仅支持作用于 region 级别
     """
 
-    def __init__(self, maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800):
+    def __init__(self, maxsize: Optional[int] = 512, ttl: Optional[int] = 1800):
         """
         初始化缓存实例
 
@@ -150,7 +150,7 @@ class CacheToolsBackend(CacheBackend):
         region = self.get_region(region)
         return self._region_caches.get(region)
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None, 
+    def set(self, key: str, value: Any, ttl: Optional[int] = None,
             region: Optional[str] = DEFAULT_CACHE_REGION, **kwargs) -> None:
         """
         设置缓存值支持每个 key 独立配置 TTL 和 Maxsize
@@ -357,7 +357,7 @@ class RedisBackend(CacheBackend):
         region = self.get_region(quote(region))
         return f"{region}:key:{quote(key)}"
 
-    def set(self, key: str, value: Any, ttl: Optional[int] = None, 
+    def set(self, key: str, value: Any, ttl: Optional[int] = None,
             region: Optional[str] = DEFAULT_CACHE_REGION, **kwargs) -> None:
         """
         设置缓存
@@ -454,7 +454,7 @@ class RedisBackend(CacheBackend):
             self.client.close()
 
 
-def get_cache_backend(maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800) -> CacheBackend:
+def get_cache_backend(maxsize: Optional[int] = 512, ttl: Optional[int] = 1800) -> CacheBackend:
     """
     根据配置获取缓存后端实例
 
@@ -482,13 +482,13 @@ def get_cache_backend(maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800) 
     return CacheToolsBackend(maxsize=maxsize, ttl=ttl)
 
 
-def cached(region: Optional[str] = None, maxsize: Optional[int] = 1000, ttl: Optional[int] = 1800,
+def cached(region: Optional[str] = None, maxsize: Optional[int] = 512, ttl: Optional[int] = 1800,
            skip_none: Optional[bool] = True, skip_empty: Optional[bool] = False):
     """
     自定义缓存装饰器，支持为每个 key 动态传递 maxsize 和 ttl
 
     :param region: 缓存的区
-    :param maxsize: 缓存的最大条目数，默认值为 1000
+    :param maxsize: 缓存的最大条目数，默认值为 512
     :param ttl: 缓存的存活时间，单位秒，默认值为 1800
     :param skip_none: 跳过 None 缓存，默认为 True
     :param skip_empty: 跳过空值缓存（如 None, [], {}, "", set()），默认为 False
@@ -529,33 +529,65 @@ def cached(region: Optional[str] = None, maxsize: Optional[int] = 1000, ttl: Opt
         # 获取缓存区
         cache_region = region if region is not None else f"{func.__module__}.{func.__name__}"
 
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            # 获取缓存键
-            cache_key = cache_backend.get_cache_key(func, args, kwargs)
-            # 尝试获取缓存
-            cached_value = cache_backend.get(cache_key, region=cache_region)
-            if should_cache(cached_value) and is_valid_cache_value(cache_key, cached_value, cache_region):
-                return cached_value
-            # 执行函数并缓存结果
-            result = func(*args, **kwargs)
-            # 判断是否需要缓存
-            if not should_cache(result):
+        # 检查是否为异步函数
+        is_async = inspect.iscoroutinefunction(func)
+
+        if is_async:
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                # 获取缓存键
+                cache_key = cache_backend.get_cache_key(func, args, kwargs)
+                # 尝试获取缓存
+                cached_value = cache_backend.get(cache_key, region=cache_region)
+                if should_cache(cached_value) and is_valid_cache_value(cache_key, cached_value, cache_region):
+                    return cached_value
+                # 执行异步函数并缓存结果
+                result = await func(*args, **kwargs)
+                # 判断是否需要缓存
+                if not should_cache(result):
+                    return result
+                # 设置缓存（如果有传入的 maxsize 和 ttl，则覆盖默认值）
+                cache_backend.set(cache_key, result, ttl=ttl, maxsize=maxsize, region=cache_region)
                 return result
-            # 设置缓存（如果有传入的 maxsize 和 ttl，则覆盖默认值）
-            cache_backend.set(cache_key, result, ttl=ttl, maxsize=maxsize, region=cache_region)
-            return result
 
-        def cache_clear():
-            """
-            清理缓存区
-            """
-            # 清理缓存区
-            cache_backend.clear(region=cache_region)
+            def cache_clear():
+                """
+                清理缓存区
+                """
+                # 清理缓存区
+                cache_backend.clear(region=cache_region)
 
-        wrapper.cache_region = cache_region
-        wrapper.cache_clear = cache_clear
-        return wrapper
+            async_wrapper.cache_region = cache_region
+            async_wrapper.cache_clear = cache_clear
+            return async_wrapper
+        else:
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                # 获取缓存键
+                cache_key = cache_backend.get_cache_key(func, args, kwargs)
+                # 尝试获取缓存
+                cached_value = cache_backend.get(cache_key, region=cache_region)
+                if should_cache(cached_value) and is_valid_cache_value(cache_key, cached_value, cache_region):
+                    return cached_value
+                # 执行函数并缓存结果
+                result = func(*args, **kwargs)
+                # 判断是否需要缓存
+                if not should_cache(result):
+                    return result
+                # 设置缓存（如果有传入的 maxsize 和 ttl，则覆盖默认值）
+                cache_backend.set(cache_key, result, ttl=ttl, maxsize=maxsize, region=cache_region)
+                return result
+
+            def cache_clear():
+                """
+                清理缓存区
+                """
+                # 清理缓存区
+                cache_backend.clear(region=cache_region)
+
+            wrapper.cache_region = cache_region
+            wrapper.cache_clear = cache_clear
+            return wrapper
 
     return decorator
 

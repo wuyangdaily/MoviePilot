@@ -6,11 +6,12 @@ from typing import Union, Optional
 
 from app.chain import ChainBase
 from app.core.config import settings
+from app.core.plugin import PluginManager
+from app.helper.system import SystemHelper
 from app.log import logger
 from app.schemas import Notification, MessageChannel
 from app.utils.http import RequestUtils
 from app.utils.system import SystemUtils
-from app.helper.system import SystemHelper
 from version import FRONTEND_VERSION, APP_VERSION
 
 
@@ -34,7 +35,7 @@ class SystemChain(ChainBase):
         重启系统
         """
         from app.core.config import global_vars
-        
+
         if channel and userid:
             self.post_message(Notification(channel=channel, source=source,
                                            title="系统正在重启，请耐心等候！", userid=userid))
@@ -146,6 +147,9 @@ class SystemChain(ChainBase):
                     continue
 
             logger.info(f"插件恢复完成，共恢复 {restored_count} 个项目")
+
+            # 安装缺少的依赖
+            PluginManager.install_plugin_missing_dependencies()
 
         # 删除备份目录
         try:

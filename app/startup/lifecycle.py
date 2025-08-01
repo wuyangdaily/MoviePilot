@@ -4,15 +4,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.chain.system import SystemChain
+from app.helper.system import SystemHelper
 from app.startup.command_initializer import init_command, stop_command, restart_command
-from app.startup.memory_initializer import init_memory_manager, stop_memory_manager
 from app.startup.modules_initializer import init_modules, stop_modules
 from app.startup.monitor_initializer import stop_monitor, init_monitor
 from app.startup.plugins_initializer import init_plugins, stop_plugins, sync_plugins
 from app.startup.routers_initializer import init_routers
 from app.startup.scheduler_initializer import stop_scheduler, init_scheduler, init_plugin_scheduler
 from app.startup.workflow_initializer import init_workflow, stop_workflow
-from app.helper.system import SystemHelper
 
 
 async def init_extra():
@@ -52,8 +51,6 @@ async def lifespan(app: FastAPI):
     init_command()
     # 初始化工作流
     init_workflow()
-    # 初始化内存管理
-    init_memory_manager()
     # 插件同步到本地
     sync_plugins_task = asyncio.create_task(init_extra())
     try:
@@ -71,8 +68,6 @@ async def lifespan(app: FastAPI):
             print(str(e))
         # 备份插件
         SystemChain().backup_plugins()
-        # 停止内存管理器
-        stop_memory_manager()
         # 停止工作流
         stop_workflow()
         # 停止命令
@@ -84,4 +79,4 @@ async def lifespan(app: FastAPI):
         # 停止插件
         stop_plugins()
         # 停止模块
-        stop_modules()
+        await stop_modules()

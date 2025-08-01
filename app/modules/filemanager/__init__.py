@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional, List, Tuple, Union, Dict, Callable
 
+from app.chain.tmdb import TmdbChain
 from app.core.config import settings
 from app.core.context import MediaInfo
 from app.core.meta import MetaBase
@@ -139,16 +140,32 @@ class FileManagerModule(_ModuleBase):
         """
         handler = TransHandler()
         # 重命名格式
-        rename_format = settings.TV_RENAME_FORMAT \
-            if mediainfo.type == MediaType.TV else settings.MOVIE_RENAME_FORMAT
+        rename_format = settings.RENAME_FORMAT(mediainfo.type)
+        # 获取集信息
+        episodes_info: Optional[List[TmdbEpisode]] = None
+        if mediainfo.type == MediaType.TV:
+            # 判断注意season为0的情况
+            season_num = mediainfo.season
+            if season_num is None and meta.season_seq:
+                if meta.season_seq.isdigit():
+                    season_num = int(meta.season_seq)
+            # 默认值1
+            if season_num is None:
+                season_num = 1
+            episodes_info = TmdbChain().tmdb_episodes(
+                tmdbid=mediainfo.tmdb_id,
+                season=season_num,
+                episode_group=mediainfo.episode_group,
+            )
         # 获取重命名后的名称
         path = handler.get_rename_path(
             template_string=rename_format,
             rename_dict=handler.get_naming_dict(meta=meta,
                                                 mediainfo=mediainfo,
+                                                episodes_info=episodes_info,
                                                 file_ext=Path(meta.title).suffix)
         )
-        return str(path)
+        return path.as_posix() if path else ""
 
     def save_config(self, storage: str, conf: Dict) -> None:
         """
@@ -344,9 +361,14 @@ class FileManagerModule(_ModuleBase):
             return None
         return storage_oper.get_parent(fileitem)
 
-    def snapshot_storage(self, storage: str, path: Path) -> Optional[Dict[str, float]]:
+    def snapshot_storage(self, storage: str, path: Path,
+                         last_snapshot_time: float = None, max_depth: int = 5) -> Optional[Dict[str, Dict]]:
         """
         快照存储
+        :param storage: 存储类型
+        :param path: 路径
+        :param last_snapshot_time: 上次快照时间，用于增量快照
+        :param max_depth: 最大递归深度，避免过深遍历
         """
         if storage not in self._support_storages:
             return None
@@ -354,7 +376,7 @@ class FileManagerModule(_ModuleBase):
         if not storage_oper:
             logger.error(f"不支持 {storage} 的快照处理")
             return None
-        return storage_oper.snapshot(path)
+        return storage_oper.snapshot(path, last_snapshot_time=last_snapshot_time, max_depth=max_depth)
 
     def storage_usage(self, storage: str) -> Optional[StorageUsage]:
         """
@@ -406,6 +428,12 @@ class FileManagerModule(_ModuleBase):
                                 message=f"{target_path} 不是有效目录")
         # 获取目标路径
         if target_directory:
+            # 目标媒体库目录未设置
+            if not target_directory.library_path:
+                logger.error(f"目标媒体库目录未设置，无法整理文件，源路径：{fileitem.path}")
+                return TransferInfo(success=False,
+                                    fileitem=fileitem,
+                                    message="目标媒体库目录未设置")
             # 整理方式
             if not transfer_type:
                 transfer_type = target_directory.transfer_type
@@ -505,19 +533,35 @@ class FileManagerModule(_ModuleBase):
             # 媒体分类路径
             dir_path = handler.get_dest_dir(mediainfo=mediainfo, target_dir=dest_dir)
             # 重命名格式
-            rename_format = settings.TV_RENAME_FORMAT \
-                if mediainfo.type == MediaType.TV else settings.MOVIE_RENAME_FORMAT
+            rename_format = settings.RENAME_FORMAT(mediainfo.type)
+            # 元数据补上常用属性，尽可能确保重命名后的路径不出现空白
+            meta = MetaInfo(mediainfo.title)
+            if meta.type == MediaType.UNKNOWN and mediainfo.type is not None:
+                meta.type = mediainfo.type
+            if meta.year is None:
+                meta.year = mediainfo.year
+            if meta.begin_season is None:
+                meta.begin_season = 1
+            if meta.begin_episode is None:
+                meta.begin_episode = 1
             # 获取路径（重命名路径）
             target_path = handler.get_rename_path(
                 path=dir_path,
                 template_string=rename_format,
-                rename_dict=handler.get_naming_dict(meta=MetaInfo(mediainfo.title),
+                rename_dict=handler.get_naming_dict(meta=meta,
                                                     mediainfo=mediainfo)
             )
-            # 计算重命名中的文件夹层数
-            rename_format_level = len(rename_format.split("/")) - 1
-            # 取相对路径的第1层目录
-            media_path = target_path.parents[rename_format_level - 1]
+            # 获取重命名后的媒体文件根路径
+            media_path = DirectoryHelper.get_media_root_path(
+                rename_format, rename_path=target_path
+            )
+            if not media_path:
+                # 忽略
+                continue
+            if dir_path != media_path and dir_path.is_relative_to(media_path):
+                # 兜底检查，避免不必要的扫盘
+                logger.warn(f"{media_path} 是媒体库目录 {dir_path} 的父目录，忽略获取媒体文件列表，请检查重命名格式！")
+                continue
             # 检索媒体文件
             fileitem = storage_oper.get_item(media_path)
             if not fileitem:
@@ -543,9 +587,12 @@ class FileManagerModule(_ModuleBase):
         if not settings.LOCAL_EXISTS_SEARCH:
             return None
 
+        logger.debug(f"正在本地媒体库中查找 {mediainfo.title_year}...")
+
         # 检查媒体库
         fileitems = self.media_files(mediainfo)
         if not fileitems:
+            logger.debug(f"{mediainfo.title_year} 不在本地媒体库中")
             return None
 
         if mediainfo.type == MediaType.MOVIE:

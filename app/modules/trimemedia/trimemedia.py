@@ -111,6 +111,8 @@ class TrimeMedia:
         if self._userinfo is None:
             return False
         logger.debug(f"{self._username} 成功登录飞牛影视")
+        # 刷新媒体库列表
+        self.get_librarys()
         return True
 
     def disconnect(self):
@@ -161,6 +163,7 @@ class TrimeMedia:
                         for img_path in library.posters or []
                     ],
                     link=f"{self._playhost or self._api.host}/library/{library.guid}",
+                    server_type='trimemedia'
                 )
             )
         return libraries
@@ -311,6 +314,8 @@ class TrimeMedia:
             logger.error("飞牛仅支持管理员账号刷新媒体库")
             return False
 
+        # 必须调用 否则容易误报 -14 Task duplicate
+        self._api.task_running()
         logger.info("刷新所有媒体库")
         return self._api.mdb_scanall()
 
@@ -337,6 +342,8 @@ class TrimeMedia:
             # 媒体库去重
             libraries.add(lib.guid)
 
+        # 必须调用 否则容易误报 -14 Task duplicate
+        self._api.task_running()
         for lib_guid in libraries:
             # 逐个刷新
             lib = self._libraries[lib_guid]
@@ -452,6 +459,7 @@ class TrimeMedia:
                 if item.duration and item.ts is not None
                 else 0
             ),
+            server_type='trimemedia',
         )
 
     def get_items(

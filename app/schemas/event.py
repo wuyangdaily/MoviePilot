@@ -3,7 +3,8 @@ from typing import Optional, Dict, Any, List, Set, Callable
 
 from pydantic import BaseModel, Field, root_validator
 
-from app.schemas import MessageChannel, FileItem
+from app.schemas.message import MessageChannel
+from app.schemas.file import FileItem
 
 
 class Event(BaseModel):
@@ -214,7 +215,7 @@ class ResourceDownloadEventData(ChainEventData):
     channel: Optional[MessageChannel] = Field(None, description="通知渠道")
     origin: Optional[str] = Field(None, description="来源")
     downloader: Optional[str] = Field(None, description="下载器")
-    options: Optional[dict] = Field(None, description="其他参数")
+    options: Optional[dict] = Field(default={}, description="其他参数")
 
     # 输出参数
     cancel: bool = Field(default=False, description="是否取消下载")

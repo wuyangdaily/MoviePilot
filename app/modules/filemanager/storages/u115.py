@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.log import logger
 from app.modules.filemanager import StorageBase
 from app.schemas.types import StorageSchema
-from app.utils.singleton import Singleton
+from app.utils.singleton import WeakSingleton
 from app.utils.string import StringUtils
 
 lock = threading.Lock()
@@ -28,7 +28,7 @@ class NoCheckInException(Exception):
     pass
 
 
-class U115Pan(StorageBase, metaclass=Singleton):
+class U115Pan(StorageBase, metaclass=WeakSingleton):
     """
     115相关操作
     """
@@ -41,18 +41,12 @@ class U115Pan(StorageBase, metaclass=Singleton):
         "move": "移动",
         "copy": "复制"
     }
-
-    # 验证参数
-    _auth_state = {}
-
-    # 上传进度值
-    _last_progress = 0
-
     # 基础url
     base_url = "https://proapi.115.com"
 
     def __init__(self):
         super().__init__()
+        self._auth_state = {}
         self.session = requests.Session()
         self._init_session()
 
@@ -219,8 +213,11 @@ class U115Pan(StorageBase, metaclass=Singleton):
 
         # 处理速率限制
         if resp.status_code == 429:
-            reset_time = int(resp.headers.get("X-RateLimit-Reset", 60))
-            time.sleep(reset_time + 5)
+            reset_time = 5 + int(resp.headers.get("X-RateLimit-Reset", 60))
+            logger.debug(
+                f"【115】{method} 请求 {endpoint} 限流，等待{reset_time}秒后重试"
+            )
+            time.sleep(reset_time)
             return self._request_api(method, endpoint, result_key, **kwargs)
 
         # 处理请求错误
@@ -489,7 +486,8 @@ class U115Pan(StorageBase, metaclass=Singleton):
                         type="file" if info_resp["file_category"] == "1" else "dir",
                         name=info_resp["file_name"],
                         basename=Path(info_resp["file_name"]).stem,
-                        extension=Path(info_resp["file_name"]).suffix[1:] if info_resp["file_category"] == "1" else None,
+                        extension=Path(info_resp["file_name"]).suffix[1:] if info_resp[
+                                                                                 "file_category"] == "1" else None,
                         pickcode=info_resp["pick_code"],
                         size=StringUtils.num_filesize(info_resp['size']) if info_resp["file_category"] == "1" else None,
                         modify_time=info_resp["utime"]
@@ -674,7 +672,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
                 "/open/folder/get_info",
                 "data",
                 data={
-                    "path": str(path)
+                    "path": path.as_posix()
                 }
             )
             if not resp:
@@ -682,7 +680,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
             return schemas.FileItem(
                 storage=self.schema.value,
                 fileid=str(resp["file_id"]),
-                path=str(path) + ("/" if resp["file_category"] == "0" else ""),
+                path=path.as_posix() + ("/" if resp["file_category"] == "0" else ""),
                 type="file" if resp["file_category"] == "1" else "dir",
                 name=resp["file_name"],
                 basename=Path(resp["file_name"]).stem,
@@ -739,7 +737,11 @@ class U115Pan(StorageBase, metaclass=Singleton):
         """
         企业级复制实现（支持目录递归复制）
         """
-        src_fid = fileitem.fileid
+        if fileitem.fileid is None:
+            fileitem = self.get_item(Path(fileitem.path))
+            if not fileitem:
+                logger.warn(f"【115】获取文件 {fileitem.path} 失败！")
+                return False
         dest_fileitem = self.get_item(path)
         if not dest_fileitem or dest_fileitem.type != "dir":
             logger.warn(f"【115】目标路径 {path} 不是一个有效的目录！")
@@ -749,7 +751,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
             "POST",
             "/open/ufile/copy",
             data={
-                "file_id": int(src_fid),
+                "file_id": int(fileitem.fileid),
                 "pid": int(dest_fileitem.fileid),
             }
         )
@@ -766,7 +768,11 @@ class U115Pan(StorageBase, metaclass=Singleton):
         """
         原子性移动操作实现
         """
-        src_fid = fileitem.fileid
+        if fileitem.fileid is None:
+            fileitem = self.get_item(Path(fileitem.path))
+            if not fileitem:
+                logger.warn(f"【115】获取文件 {fileitem.path} 失败！")
+                return False
         dest_fileitem = self.get_item(path)
         if not dest_fileitem or dest_fileitem.type != "dir":
             logger.warn(f"【115】目标路径 {path} 不是一个有效的目录！")
@@ -775,7 +781,7 @@ class U115Pan(StorageBase, metaclass=Singleton):
             "POST",
             "/open/ufile/move",
             data={
-                "file_ids": int(src_fid),
+                "file_ids": int(fileitem.fileid),
                 "to_cid": int(dest_fileitem.fileid),
             }
         )
