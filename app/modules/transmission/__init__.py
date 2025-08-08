@@ -139,7 +139,7 @@ class TransmissionModule(_ModuleBase, _DownloaderBase[Transmission]):
         if label:
             labels = label.split(',')
         elif settings.TORRENT_TAG:
-            labels = [settings.TORRENT_TAG]
+            labels = settings.TORRENT_TAG.split(',')
         else:
             labels = None
         # 添加任务
@@ -253,7 +253,8 @@ class TransmissionModule(_ModuleBase, _DownloaderBase[Transmission]):
                             path=Path(torrent.download_dir) / torrent.name,
                             hash=torrent.hashString,
                             size=torrent.total_size,
-                            tags=",".join(torrent.labels or [])
+                            tags=",".join(torrent.labels or []),
+                            progress=torrent.progress
                         ))
                 finally:
                     torrents.clear()
