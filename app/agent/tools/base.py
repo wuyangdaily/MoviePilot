@@ -37,7 +37,11 @@ class MoviePilotTool(BaseTool, metaclass=ABCMeta):
         # 发送运行工具前的消息
         agent_message = await self._callback_handler.get_message()
         if agent_message:
-            await self.send_tool_message(agent_message)
+            await self.send_tool_message(agent_message, title="MoviePilot助手")
+        # 发送执行工具说明
+        explanation = kwargs.get("explanation")
+        if explanation:
+            await self.send_tool_message(f"▶️️{explanation}")
         return await self.run(**kwargs)
 
     @abstractmethod
@@ -54,7 +58,7 @@ class MoviePilotTool(BaseTool, metaclass=ABCMeta):
         """设置回调处理器"""
         self._callback_handler = callback_handler
 
-    async def send_tool_message(self, message: str, title: str = "执行工具"):
+    async def send_tool_message(self, message: str, title: str = ""):
         """发送工具消息"""
         await ToolChain().async_post_message(
             Notification(
@@ -64,5 +68,6 @@ class MoviePilotTool(BaseTool, metaclass=ABCMeta):
                 username=self._username,
                 title=title,
                 text=message
-            )
+            ),
+            escape_markdown=False
         )

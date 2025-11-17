@@ -17,14 +17,14 @@ class QueryMediaLibraryInput(BaseModel):
     media_type: Optional[str] = Field("all",
                                       description="Type of media content: '电影' for films, '电视剧' for television series or anime series, 'all' for all types")
     title: Optional[str] = Field(None,
-                                 description="Specific media title to search for (optional, if provided returns detailed info for that specific media)")
+                                 description="Specific media title to check if it exists in the media library (optional, if provided checks for that specific media)")
     year: Optional[str] = Field(None,
                                 description="Release year of the media (optional, helps narrow down search results)")
 
 
 class QueryMediaLibraryTool(MoviePilotTool):
     name: str = "query_media_library"
-    description: str = "Query media library status and list all media files that have been successfully processed and added to the media server (Plex, Emby, Jellyfin). Shows library statistics and file details."
+    description: str = "Check if a specific media resource already exists in the media library (Plex, Emby, Jellyfin). Use this tool to verify whether a movie or TV series has been successfully processed and added to the media server before performing operations like downloading or subscribing."
     args_schema: Type[BaseModel] = QueryMediaLibraryInput
 
     async def run(self, media_type: Optional[str] = "all",
@@ -32,10 +32,10 @@ class QueryMediaLibraryTool(MoviePilotTool):
         logger.info(f"执行工具: {self.name}, 参数: media_type={media_type}, title={title}")
         try:
             media_server_oper = MediaServerOper()
-            filtered_medias: List[MediaServerItem] = media_server_oper.exists(title=title, year=year, mtype=media_type)
+            filtered_medias: List[MediaServerItem] = await media_server_oper.async_exists(title=title, year=year, mtype=media_type)
             if filtered_medias:
                 return json.dumps([m.to_dict() for m in filtered_medias])
-            return "媒体库中未找到相关媒体。"
+            return "媒体库中未找到相关媒体"
         except Exception as e:
             logger.error(f"查询媒体库失败: {e}", exc_info=True)
             return f"查询媒体库时发生错误: {str(e)}"
