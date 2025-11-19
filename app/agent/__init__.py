@@ -13,7 +13,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from app.agent.callback import StreamingCallbackHandler
 from app.agent.memory import ConversationMemoryManager
 from app.agent.prompt import PromptManager
-from app.agent.tools import MoviePilotToolFactory
+from app.agent.tools.factory import MoviePilotToolFactory
 from app.chain import ChainBase
 from app.core.config import settings
 from app.helper.message import MessageHelper
@@ -221,15 +221,20 @@ class MoviePilotAgent:
             agent_message = await self.callback_handler.get_message()
 
             # 发送Agent回复给用户（通过原渠道）
-            await self.send_agent_message(agent_message)
+            if agent_message:
+                # 发送回复
+                await self.send_agent_message(agent_message)
 
-            # 添加Agent回复到记忆
-            await self.memory_manager.add_memory(
-                session_id=self.session_id,
-                user_id=self.user_id,
-                role="agent",
-                content=agent_message
-            )
+                # 添加Agent回复到记忆
+                await self.memory_manager.add_memory(
+                    session_id=self.session_id,
+                    user_id=self.user_id,
+                    role="agent",
+                    content=agent_message
+                )
+            else:
+                agent_message = "很抱歉，智能体出错了，未能生成回复内容。"
+                await self.send_agent_message(agent_message)
 
             return agent_message
 
