@@ -73,15 +73,29 @@ class MoviePilotAgent:
             raise ValueError("未配置 LLM_API_KEY")
 
         if provider == "google":
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            return ChatGoogleGenerativeAI(
-                model=settings.LLM_MODEL,
-                google_api_key=api_key,
-                max_retries=3,
-                temperature=settings.LLM_TEMPERATURE,
-                streaming=True,
-                callbacks=[self.callback_handler]
-            )
+            if settings.PROXY_HOST:
+                from langchain_openai import ChatOpenAI
+                return ChatOpenAI(
+                    model=settings.LLM_MODEL,
+                    api_key=api_key,
+                    max_retries=3,
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                    temperature=settings.LLM_TEMPERATURE,
+                    streaming=True,
+                    callbacks=[self.callback_handler],
+                    stream_usage=True,
+                    openai_proxy=settings.PROXY_HOST
+                )
+            else:
+                from langchain_google_genai import ChatGoogleGenerativeAI
+                return ChatGoogleGenerativeAI(
+                    model=settings.LLM_MODEL,
+                    google_api_key=api_key,
+                    max_retries=3,
+                    temperature=settings.LLM_TEMPERATURE,
+                    streaming=True,
+                    callbacks=[self.callback_handler]
+                )
         elif provider == "deepseek":
             from langchain_deepseek import ChatDeepSeek
             return ChatDeepSeek(
@@ -103,7 +117,8 @@ class MoviePilotAgent:
                 temperature=settings.LLM_TEMPERATURE,
                 streaming=True,
                 callbacks=[self.callback_handler],
-                stream_usage=True
+                stream_usage=True,
+                openai_proxy=settings.PROXY_HOST
             )
 
     def _initialize_tools(self) -> List:
