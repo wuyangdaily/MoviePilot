@@ -278,7 +278,7 @@ class ConfigModel(BaseModel):
     # 搜索多个名称
     SEARCH_MULTIPLE_NAME: bool = False
     # 最大搜索名称数量
-    MAX_SEARCH_NAME_LIMIT: int = 2
+    MAX_SEARCH_NAME_LIMIT: int = 3
 
     # ==================== 下载配置 ====================
     # 种子标签
@@ -842,6 +842,18 @@ class Settings(BaseSettings, ConfigModel, LogConfigModel):
         rename_format = rename_format.replace("\\", "/")
         rename_format = re.sub(r'/+', '/', rename_format)
         return rename_format.strip("/")
+
+    def TMDB_IMAGE_URL(self, file_path: str, file_size: str = "original") -> str:
+        """
+        获取TMDB图片网址
+
+        :param file_path: TMDB API返回的xxx_path
+        :param file_size: 图片大小，例如：'original', 'w500' 等
+        :return: 图片的完整URL
+        """
+        return (
+            f"https://{self.TMDB_IMAGE_DOMAIN}/t/p/{file_size}/{file_path.removeprefix('/')}"
+        )
 
 
 # 实例化配置
