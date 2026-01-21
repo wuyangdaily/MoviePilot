@@ -219,7 +219,7 @@ class ConfigModel(BaseModel):
     AUTO_UPDATE_RESOURCE: bool = True
 
     # ==================== 媒体文件格式配置 ====================
-    # 支持的后缀格式
+    # 支持的视频文件后缀格式
     RMT_MEDIAEXT: list = Field(
         default_factory=lambda: ['.mp4', '.mkv', '.ts', '.iso',
                                  '.rmvb', '.avi', '.mov', '.mpeg',
@@ -230,8 +230,6 @@ class ConfigModel(BaseModel):
     # 支持的字幕文件后缀格式
     RMT_SUBEXT: list = Field(default_factory=lambda: ['.srt', '.ass', '.ssa', '.sup'])
     # 支持的音轨文件后缀格式
-    RMT_AUDIO_TRACK_EXT: list = Field(default_factory=lambda: ['.mka'])
-    # 音轨文件后缀格式
     RMT_AUDIOEXT: list = Field(
         default_factory=lambda: ['.aac', '.ac3', '.amr', '.caf', '.cda', '.dsf',
                                  '.dff', '.kar', '.m4a', '.mp1', '.mp2', '.mp3',
@@ -305,6 +303,8 @@ class ConfigModel(BaseModel):
     COOKIECLOUD_BLACKLIST: Optional[str] = None
 
     # ==================== 整理配置 ====================
+    # 文件整理线程数
+    TRANSFER_THREADS: int = 5
     # 电影重命名格式
     MOVIE_RENAME_FORMAT: str = "{{title}}{% if year %} ({{year}}){% endif %}" \
                                "/{{title}}{% if year %} ({{year}}){% endif %}{% if part %}-{{part}}{% endif %}{% if videoFormat %} - {{videoFormat}}{% endif %}" \
@@ -395,6 +395,8 @@ class ConfigModel(BaseModel):
     SECURITY_IMAGE_SUFFIXES: list = Field(default=[".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif"])
     # PassKey 是否强制用户验证（生物识别等）
     PASSKEY_REQUIRE_UV: bool = True
+    # 允许在未启用 OTP 时直接注册 PassKey
+    PASSKEY_ALLOW_REGISTER_WITHOUT_OTP: bool = False
 
     # ==================== 工作流配置 ====================
     # 工作流数据共享
