@@ -489,6 +489,9 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         """
         判断是否为主要媒体文件
         """
+        if fileitem.type == "dir":
+            # 蓝光原盘判断
+            return StorageChain().is_bluray_folder(fileitem)
         if not fileitem.extension:
             return False
         return True if f".{fileitem.extension.lower()}" in self._media_exts else False
@@ -637,18 +640,9 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         if self.jobview.is_finished(task):
             __notify()
 
-        # 全部整理完成，设置完成的种子为已整理
-        if self.jobview.is_done(task):
-            # 查询作业中的所有任务
-            tasks = self.jobview.all_tasks(task.mediainfo, task.meta.begin_season)
-            processed_hashes = set()
-            for t in tasks:
-                if t.download_hash and t.download_hash not in processed_hashes:
-                    # 检查该种子的所有任务（跨作业）是否都已完成
-                    if self.jobview.is_torrent_done(t.download_hash):
-                        processed_hashes.add(t.download_hash)
-                        # 设置种子状态为已整理
-                        self.transfer_completed(hashs=t.download_hash, downloader=t.downloader)
+        # 只要该种子的所有任务都已整理完成，则设置种子状态为已整理
+        if task.download_hash and self.jobview.is_torrent_done(task.download_hash):
+            self.transfer_completed(hashs=task.download_hash, downloader=task.downloader)
 
         # 移动模式，全部成功时删除空目录和种子文件
         if transferinfo.transfer_type in ["move"]:
@@ -668,9 +662,6 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
                     if not t.download_hash and t.fileitem:
                         # 删除剩余空目录
                         StorageChain().delete_media_file(t.fileitem, delete_self=False)
-
-        # 清理作业
-        self.jobview.remove_job(task)
 
         return ret_status, ret_message
 
@@ -980,11 +971,14 @@ class TransferChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
 
             # 从下载器获取种子列表
             if torrents_list := self.list_torrents(status=TorrentStatus.TRANSFER):
+                seen = set()
                 existing_hashes = self.jobview.get_all_torrent_hashes()
                 torrents = [
                     torrent
                     for torrent in torrents_list
-                    if torrent.hash not in existing_hashes
+                    if (h := torrent.hash) not in existing_hashes
+                    # 排除多下载器返回的重复种子
+                    and (h not in seen and (seen.add(h) or True))
                 ]
             else:
                 torrents = []
