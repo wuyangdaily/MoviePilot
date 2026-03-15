@@ -33,8 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rsync \
     ffmpeg \
     nano \
+    libjemalloc2 \
     && dpkg-reconfigure --frontend noninteractive tzdata \
     && curl https://rclone.org/install.sh | bash \
+    && ln -s /usr/lib/*-linux-gnu/libjemalloc.so.2 /usr/local/lib/libjemalloc.so \
     && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf \
@@ -89,6 +91,8 @@ RUN FRONTEND_VERSION=$(sed -n "s/^FRONTEND_VERSION\s*=\s*'\([^']*\)'/\1/p" /app/
 # final 阶段: 安装运行时依赖和配置最终镜像
 FROM prepare_package AS final
 
+ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so"
+
 # python 环境
 COPY --from=prepare_venv --chmod=777 ${VENV_PATH} ${VENV_PATH}
 
@@ -121,6 +125,7 @@ RUN cp -f /app/docker/nginx.common.conf /etc/nginx/common.conf \
     && echo "/app/" > ${VENV_PATH}/lib/python${python_ver%.*}/site-packages/app.pth \
     && echo 'fs.inotify.max_user_watches=5242880' >> /etc/sysctl.conf \
     && echo 'fs.inotify.max_user_instances=5242880' >> /etc/sysctl.conf \
+    && echo "zh_CN.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen zh_CN.UTF-8
 
 EXPOSE 3000
