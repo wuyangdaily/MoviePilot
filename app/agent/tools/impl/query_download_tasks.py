@@ -10,7 +10,7 @@ from app.chain.download import DownloadChain
 from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.log import logger
 from app.schemas import TransferTorrent, DownloadingTorrent
-from app.schemas.types import TorrentStatus
+from app.schemas.types import TorrentStatus, media_type_to_agent
 
 
 class QueryDownloadTasksInput(BaseModel):
@@ -50,6 +50,18 @@ class QueryDownloadTasksTool(MoviePilotTool):
         all_torrents.extend(transfer_torrents)
         
         return all_torrents
+
+    @staticmethod
+    def _format_progress(progress: Optional[float]) -> Optional[str]:
+        """
+        将下载进度格式化为保留一位小数的百分比字符串
+        """
+        try:
+            if progress is None:
+                return None
+            return f"{float(progress):.1f}%"
+        except (TypeError, ValueError):
+            return None
 
     def get_tool_message(self, **kwargs) -> Optional[str]:
         """根据查询参数生成友好的提示消息"""
@@ -198,7 +210,7 @@ class QueryDownloadTasksTool(MoviePilotTool):
                         "year": d.year,
                         "season_episode": d.season_episode,
                         "size": d.size,
-                        "progress": d.progress,
+                        "progress": self._format_progress(d.progress),
                         "state": d.state,
                         "upspeed": d.upspeed,
                         "dlspeed": d.dlspeed,
@@ -208,7 +220,7 @@ class QueryDownloadTasksTool(MoviePilotTool):
                     if d.media:
                         simplified["media"] = {
                             "tmdbid": d.media.get("tmdbid"),
-                            "type": d.media.get("type"),
+                            "type": media_type_to_agent(d.media.get("type")),
                             "title": d.media.get("title"),
                             "season": d.media.get("season"),
                             "episode": d.media.get("episode")

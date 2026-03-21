@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Optional
 
 
 # 媒体类型
@@ -7,6 +8,26 @@ class MediaType(Enum):
     TV = '电视剧'
     COLLECTION = '系列'
     UNKNOWN = '未知'
+
+    @staticmethod
+    def from_agent(key: str) -> Optional["MediaType"]:
+        """'movie' -> MediaType.MOVIE, 'tv' -> MediaType.TV, 否则 None"""
+        _map = {"movie": MediaType.MOVIE, "tv": MediaType.TV}
+        return _map.get(key.strip().lower() if key else "")
+
+    def to_agent(self) -> str:
+        """MediaType.MOVIE -> 'movie', MediaType.TV -> 'tv', 其他返回 .value"""
+        return {MediaType.MOVIE: "movie", MediaType.TV: "tv"}.get(self, self.value)
+
+
+def media_type_to_agent(value) -> Optional[str]:
+    """将 MediaType 枚举或中文字符串统一转为 'movie'/'tv'"""
+    if isinstance(value, MediaType):
+        return value.to_agent()
+    if isinstance(value, str):
+        mt = MediaType.from_agent(value)
+        return mt.to_agent() if mt else value
+    return None
 
 
 # 排序类型枚举
@@ -377,3 +398,41 @@ class OtherModulesType(Enum):
     PostgreSQL = "PostgreSQL"
     # Redis
     Redis = "Redis"
+
+
+class NameValueEnum(Enum):
+    """支持通过 name 或 value 实例化的枚举基类"""
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str):
+            for member in cls:
+                if member.name.lower() == value.lower() or member.value == value:
+                    return member
+        return None
+
+
+# 刮削策略
+class ScrapingPolicy(NameValueEnum):
+    MISSINGONLY = "仅缺失"
+    SKIP = "跳过"
+    OVERWRITE = "覆盖"
+
+
+# 刮削目标类型
+class ScrapingTarget(NameValueEnum):
+    MOVIE = "电影"
+    TV = "电视剧"
+    SEASON = "季"
+    EPISODE = "集"
+
+
+# 刮削元数据类型
+class ScrapingMetadata(NameValueEnum):
+    NFO = "NFO"
+    POSTER = "海报"
+    BACKDROP = "背景图"
+    LOGO = "Logo"
+    BANNER = "横幅图"
+    THUMB = "缩略图"
+    DISC = "光盘图"
