@@ -18,6 +18,7 @@ from app.agent.callback import StreamingHandler
 from app.agent.memory import memory_manager
 from app.agent.middleware.memory import MemoryMiddleware
 from app.agent.middleware.patch_tool_calls import PatchToolCallsMiddleware
+from app.agent.middleware.skills import SkillsMiddleware
 from app.agent.prompt import prompt_manager
 from app.agent.tools.factory import MoviePilotToolFactory
 from app.chain import ChainBase
@@ -37,12 +38,12 @@ class MoviePilotAgent:
     """
 
     def __init__(
-        self,
-        session_id: str,
-        user_id: str = None,
-        channel: str = None,
-        source: str = None,
-        username: str = None,
+            self,
+            session_id: str,
+            user_id: str = None,
+            channel: str = None,
+            source: str = None,
+            username: str = None,
     ):
         self.session_id = session_id
         self.user_id = user_id
@@ -91,8 +92,10 @@ class MoviePilotAgent:
 
             # 中间件
             middlewares = [
-                # 工具选择
-                LLMToolSelectorMiddleware(model=llm, max_tools=20),
+                # Skills
+                SkillsMiddleware(
+                    sources=[str(settings.CONFIG_PATH / "agent" / "skills")],
+                ),
                 # 记忆管理
                 MemoryMiddleware(
                     sources=[str(settings.CONFIG_PATH / "agent" / "MEMORY.md")]
@@ -102,6 +105,14 @@ class MoviePilotAgent:
                 # 错误工具调用修复
                 PatchToolCallsMiddleware(),
             ]
+
+            # 工具选择
+            if settings.LLM_MAX_TOOLS > 0:
+                middlewares.append(
+                    LLMToolSelectorMiddleware(
+                        model=llm, max_tools=settings.LLM_MAX_TOOLS
+                    )
+                )
 
             return create_agent(
                 model=llm,
@@ -165,19 +176,19 @@ class MoviePilotAgent:
 
             # 流式运行智能体
             async for chunk in agent.astream(
-                {"messages": messages},
-                stream_mode="messages",
-                config=agent_config,
-                subgraphs=False,
-                version="v2",
+                    {"messages": messages},
+                    stream_mode="messages",
+                    config=agent_config,
+                    subgraphs=False,
+                    version="v2",
             ):
                 # 处理流式token（过滤工具调用token，只保留模型生成的内容）
                 if chunk["type"] == "messages":
                     token, metadata = chunk["data"]
                     if (
-                        token
-                        and hasattr(token, "tool_call_chunks")
-                        and not token.tool_call_chunks
+                            token
+                            and hasattr(token, "tool_call_chunks")
+                            and not token.tool_call_chunks
                     ):
                         if token.content:
                             self.stream_handler.emit(token.content)
@@ -210,7 +221,7 @@ class MoviePilotAgent:
             logger.error(f"Agent执行失败: {e} - {traceback.format_exc()}")
             return str(e), {}
 
-    async def send_agent_message(self, message: str, title: str = "MoviePilot助手"):
+    async def send_agent_message(self, message: str, title: str = ""):
         """
         通过原渠道发送消息给用户
         """
@@ -245,7 +256,7 @@ class AgentManager:
         """
         初始化管理器
         """
-        await memory_manager.initialize()
+        memory_manager.initialize()
 
     async def close(self):
         """
@@ -257,13 +268,13 @@ class AgentManager:
         self.active_agents.clear()
 
     async def process_message(
-        self,
-        session_id: str,
-        user_id: str,
-        message: str,
-        channel: str = None,
-        source: str = None,
-        username: str = None,
+            self,
+            session_id: str,
+            user_id: str,
+            message: str,
+            channel: str = None,
+            source: str = None,
+            username: str = None,
     ) -> str:
         """
         处理用户消息
@@ -300,7 +311,7 @@ class AgentManager:
             agent = self.active_agents[session_id]
             await agent.cleanup()
             del self.active_agents[session_id]
-            await memory_manager.clear_memory(session_id, user_id)
+            memory_manager.clear_memory(session_id, user_id)
             logger.info(f"会话 {session_id} 的记忆已清空")
 
 
