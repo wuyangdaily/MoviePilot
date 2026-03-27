@@ -1,7 +1,6 @@
 import asyncio
 import traceback
 import uuid
-from time import strftime
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
@@ -42,12 +41,12 @@ class MoviePilotAgent:
     """
 
     def __init__(
-        self,
-        session_id: str,
-        user_id: str = None,
-        channel: str = None,
-        source: str = None,
-        username: str = None,
+            self,
+            session_id: str,
+            user_id: str = None,
+            channel: str = None,
+            source: str = None,
+            username: str = None,
     ):
         self.session_id = session_id
         self.user_id = user_id
@@ -81,19 +80,21 @@ class MoviePilotAgent:
         """
         if not content:
             return ""
-        if isinstance(content, str):
-            return content
+        # 跳过思考/推理类型的内容块
         if isinstance(content, list):
             text_parts = []
             for block in content:
                 if isinstance(block, str):
                     text_parts.append(block)
                 elif isinstance(block, dict):
-                    # 跳过思考/推理类型的内容块
+                    # 优先检查 thought 标志（LangChain Google GenAI 方案）
+                    if block.get("thought"):
+                        continue
                     if block.get("type") in (
-                        "thinking",
-                        "reasoning_content",
-                        "reasoning",
+                            "thinking",
+                            "reasoning_content",
+                            "reasoning",
+                            "thought",
                     ):
                         continue
                     if block.get("type") == "text":
@@ -124,7 +125,7 @@ class MoviePilotAgent:
             # 系统提示词
             system_prompt = prompt_manager.get_agent_prompt(
                 channel=self.channel
-            ).format(current_date=strftime("%Y-%m-%d"))
+            )
 
             # LLM 模型（用于 agent 执行）
             llm = self._initialize_llm()
@@ -199,7 +200,7 @@ class MoviePilotAgent:
             return error_message
 
     async def _stream_agent_tokens(
-        self, agent, messages: dict, config: dict, on_token: Callable[[str], None]
+            self, agent, messages: dict, config: dict, on_token: Callable[[str], None]
     ):
         """
         流式运行智能体，过滤工具调用token和思考内容，将模型生成的内容通过回调输出。
@@ -209,18 +210,18 @@ class MoviePilotAgent:
         :param on_token: 收到有效 token 时的回调
         """
         async for chunk in agent.astream(
-            messages,
-            stream_mode="messages",
-            config=config,
-            subgraphs=False,
-            version="v2",
+                messages,
+                stream_mode="messages",
+                config=config,
+                subgraphs=False,
+                version="v2",
         ):
             if chunk["type"] == "messages":
                 token, metadata = chunk["data"]
                 if (
-                    token
-                    and hasattr(token, "tool_call_chunks")
-                    and not token.tool_call_chunks
+                        token
+                        and hasattr(token, "tool_call_chunks")
+                        and not token.tool_call_chunks
                 ):
                     # 跳过模型思考/推理内容（如 DeepSeek R1 的 reasoning_content）
                     additional = getattr(token, "additional_kwargs", None)
@@ -421,13 +422,13 @@ class AgentManager:
         self.active_agents.clear()
 
     async def process_message(
-        self,
-        session_id: str,
-        user_id: str,
-        message: str,
-        channel: str = None,
-        source: str = None,
-        username: str = None,
+            self,
+            session_id: str,
+            user_id: str,
+            message: str,
+            channel: str = None,
+            source: str = None,
+            username: str = None,
     ) -> str:
         """
         处理用户消息：将消息放入会话队列，按顺序依次处理。
@@ -451,8 +452,8 @@ class AgentManager:
 
         # 如果队列中已有等待的消息，通知用户消息已排队
         if queue_size > 0 or (
-            session_id in self._session_workers
-            and not self._session_workers[session_id].done()
+                session_id in self._session_workers
+                and not self._session_workers[session_id].done()
         ):
             logger.info(
                 f"会话 {session_id} 有任务正在处理，消息已排队等待 "
@@ -464,8 +465,8 @@ class AgentManager:
 
         # 确保该会话有一个worker在运行
         if (
-            session_id not in self._session_workers
-            or self._session_workers[session_id].done()
+                session_id not in self._session_workers
+                or self._session_workers[session_id].done()
         ):
             self._session_workers[session_id] = asyncio.create_task(
                 self._session_worker(session_id)
@@ -506,8 +507,8 @@ class AgentManager:
             await self._session_workers.pop(session_id, None)
             # 如果队列为空，清理队列
             if (
-                session_id in self._session_queues
-                and self._session_queues[session_id].empty()
+                    session_id in self._session_queues
+                    and self._session_queues[session_id].empty()
             ):
                 self._session_queues.pop(session_id, None)
 

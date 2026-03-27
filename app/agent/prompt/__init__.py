@@ -1,8 +1,10 @@
 """提示词管理器"""
 
 from pathlib import Path
+from time import strftime
 from typing import Dict
 
+from app.core.config import settings
 from app.log import logger
 from app.schemas import (
     ChannelCapability,
@@ -64,14 +66,29 @@ class PromptManager:
             if channel
             else None
         )
+        # 获取渠道能力说明
         if msg_channel:
-            # 获取渠道能力说明
             caps = ChannelCapabilityManager.get_capabilities(msg_channel)
             if caps:
                 markdown_spec = self._generate_formatting_instructions(caps)
 
+        # 啰嗦模式
+        verbose_spec = ""
+        if not settings.AI_AGENT_VERBOSE:
+            verbose_spec = (
+                "\n\n[Important Instruction] STRICTLY ENFORCED: DO NOT output any conversational "
+                "text, thinking processes, or explanations before or during tool calls. Call tools "
+                "directly without any transitional phrases. "
+                "You MUST remain completely silent until the task is completely finished. "
+                "DO NOT output any content whatsoever until your final summary reply."
+            )
+
         # 始终替换占位符，避免后续 .format() 时因残留花括号报 KeyError
-        base_prompt = base_prompt.replace("{markdown_spec}", markdown_spec)
+        base_prompt = base_prompt.format(
+            markdown_spec=markdown_spec,
+            verbose_spec=verbose_spec,
+            current_date=strftime("%Y-%m-%d")
+        )
 
         return base_prompt
 
