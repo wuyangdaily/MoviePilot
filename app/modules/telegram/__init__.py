@@ -194,26 +194,33 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
         text = msg.get("text")
         user_id = msg.get("from", {}).get("id")
         user_name = msg.get("from", {}).get("username")
-        # Extract chat_id to enable correct reply targeting
         chat_id = msg.get("chat", {}).get("id")
 
-        if text and user_id:
+        images = self._extract_images(msg)
+
+        if user_id:
+            if not text and not images:
+                logger.debug(
+                    f"收到来自 {client_config.name} 的Telegram消息无文本和图片"
+                )
+                return None
+
             logger.info(
                 f"收到来自 {client_config.name} 的Telegram消息："
-                f"userid={user_id}, username={user_name}, chat_id={chat_id}, text={text}"
+                f"userid={user_id}, username={user_name}, chat_id={chat_id}, text={text}, images={len(images) if images else 0}"
             )
 
-            # Clean bot mentions from text to ensure consistent processing
-            cleaned_text = self._clean_bot_mention(
-                text, client.bot_username if client else None
+            cleaned_text = (
+                self._clean_bot_mention(text, client.bot_username if client else None)
+                if text
+                else None
             )
 
-            # 检查权限
             admin_users = client_config.config.get("TELEGRAM_ADMINS")
             user_list = client_config.config.get("TELEGRAM_USERS")
             config_chat_id = client_config.config.get("TELEGRAM_CHAT_ID")
 
-            if cleaned_text.startswith("/"):
+            if cleaned_text and cleaned_text.startswith("/"):
                 if (
                     admin_users
                     and str(user_id) not in admin_users.split(",")
@@ -236,10 +243,33 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
                 source=client_config.name,
                 userid=user_id,
                 username=user_name,
-                text=cleaned_text,  # Use cleaned text
+                text=cleaned_text,
                 chat_id=str(chat_id) if chat_id else None,
+                images=images if images else None,
             )
         return None
+
+    @staticmethod
+    def _extract_images(msg: dict) -> Optional[List[str]]:
+        """
+        从Telegram消息中提取图片file_id
+        """
+        images = []
+        photo = msg.get("photo")
+        if photo and isinstance(photo, list):
+            largest_photo = photo[-1]
+            file_id = largest_photo.get("file_id")
+            if file_id:
+                images.append(file_id)
+
+        document = msg.get("document")
+        if document:
+            file_id = document.get("file_id")
+            mime_type = document.get("mime_type", "")
+            if file_id and mime_type.startswith("image/"):
+                images.append(file_id)
+
+        return images if images else None
 
     @staticmethod
     def _clean_bot_mention(text: str, bot_username: Optional[str]) -> str:
@@ -258,7 +288,7 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
 
         # Remove mention at the beginning with optional following space
         if cleaned.startswith(mention_pattern):
-            cleaned = cleaned[len(mention_pattern) :].lstrip()
+            cleaned = cleaned[len(mention_pattern):].lstrip()
 
         # Remove mention at any other position
         cleaned = cleaned.replace(mention_pattern, "").strip()
@@ -495,3 +525,23 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
                     f"Command set has changed, Updating new commands: {filtered_scoped_commands}"
                 )
             client.register_commands(filtered_scoped_commands)
+
+    def download_file_to_base64(self, file_id: str, source: str) -> Optional[str]:
+        """
+        下载Telegram文件并转为base64
+        :param file_id: Telegram文件ID
+        :param source: 来源名称
+        :return: base64编码的图片数据
+        """
+        config = self.get_config(source)
+        if not config:
+            return None
+        client = self.get_instance(config.name)
+        if not client:
+            return None
+        file_content = client.download_file(file_id)
+        if file_content:
+            import base64
+
+            return base64.b64encode(file_content).decode()
+        return None

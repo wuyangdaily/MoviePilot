@@ -1,5 +1,6 @@
 """提示词管理器"""
 
+import socket
 from pathlib import Path
 from time import strftime
 from typing import Dict
@@ -12,6 +13,7 @@ from app.schemas import (
     MessageChannel,
     ChannelCapabilityManager,
 )
+from app.utils.system import SystemUtils
 
 
 class PromptManager:
@@ -90,51 +92,57 @@ class PromptManager:
         base_prompt = base_prompt.format(
             markdown_spec=markdown_spec,
             verbose_spec=verbose_spec,
-            current_date=strftime("%Y-%m-%d"),
             moviepilot_info=moviepilot_info,
         )
 
         return base_prompt
 
-    def _get_moviepilot_info(self) -> str:
+    @staticmethod
+    def _get_moviepilot_info() -> str:
         """
         获取MoviePilot系统信息，用于注入到系统提示词中
         """
-        import socket
-
+        # 获取主机名和IP地址
         try:
             hostname = socket.gethostname()
             ip_address = socket.gethostbyname(hostname)
-        except Exception:
+        except Exception:  # noqa
             hostname = "localhost"
             ip_address = "127.0.0.1"
 
+        # 配置文件和日志文件目录
         config_path = str(settings.CONFIG_PATH)
         log_path = str(settings.LOG_PATH)
 
+        # API地址构建
         api_port = settings.PORT
         api_path = settings.API_V1_STR
 
-        if settings.APP_DOMAIN:
-            domain = settings.APP_DOMAIN
-            if domain.startswith("http://") or domain.startswith("https://"):
-                api_url = f"{domain}{api_path}"
-            else:
-                api_url = f"https://{domain}{api_path}"
-        else:
-            api_url = f"http://{ip_address}:{api_port}{api_path}"
-
+        # API令牌
         api_token = settings.API_TOKEN or "未设置"
 
+        # 数据库信息
+        db_type = settings.DB_TYPE
+        if db_type == "sqlite":
+            db_info = f"SQLite ({settings.CONFIG_PATH / 'db' / 'moviepilot.db'})"
+        else:
+            db_password = settings.DB_POSTGRESQL_PASSWORD or ""
+            db_info = f"PostgreSQL ({settings.DB_POSTGRESQL_USERNAME}:{db_password}@{settings.DB_POSTGRESQL_HOST}:{settings.DB_POSTGRESQL_PORT}/{settings.DB_POSTGRESQL_DATABASE})"
+
         info_lines = [
+            f"- 当前时间: {strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- 运行环境: {SystemUtils.platform} {'docker' if SystemUtils.is_docker() else ''}",
             f"- 主机名: {hostname}",
             f"- IP地址: {ip_address}",
-            f"- API地址: {api_url}",
             f"- API端口: {api_port}",
             f"- API路径: {api_path}",
             f"- API令牌: {api_token}",
+            f"- 外网域名: {settings.APP_DOMAIN or '未设置'}",
+            f"- 数据库类型: {db_type}",
+            f"- 数据库: {db_info}",
             f"- 配置文件目录: {config_path}",
             f"- 日志文件目录: {log_path}",
+            f"- 系统安装目录: {settings.ROOT_PATH}",
         ]
 
         return "\n".join(info_lines)
