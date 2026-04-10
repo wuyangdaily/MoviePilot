@@ -30,6 +30,8 @@ from app.core.config import settings
 from app.helper.llm import LLMHelper
 from app.log import logger
 from app.schemas import Notification, NotificationType
+from app.schemas.message import ChannelCapabilityManager, ChannelCapability
+from app.schemas.types import MessageChannel
 
 
 class AgentChain(ChainBase):
@@ -68,7 +70,7 @@ class _ThinkTagStripper:
                         on_output(self.buffer[:start_idx])
                         emitted = True
                     self.in_think_tag = True
-                    self.buffer = self.buffer[start_idx + 7:]
+                    self.buffer = self.buffer[start_idx + 7 :]
                 else:
                     # 检查是否以 <think> 的不完整前缀结尾
                     partial_match = False
@@ -88,7 +90,7 @@ class _ThinkTagStripper:
                 end_idx = self.buffer.find("</think>")
                 if end_idx != -1:
                     self.in_think_tag = False
-                    self.buffer = self.buffer[end_idx + 8:]
+                    self.buffer = self.buffer[end_idx + 8 :]
                 else:
                     # 检查是否以 </think> 的不完整前缀结尾
                     partial_match = False
@@ -136,14 +138,37 @@ class MoviePilotAgent:
         """
         是否为后台任务模式（无渠道信息，如定时唤醒）
         """
-        return not self.channel and not self.source
+        return not self.channel or not self.source
+
+    def _should_stream(self) -> bool:
+        """
+        判断是否应启用流式输出：
+        - 后台模式不启用流式输出
+        - 渠道支持消息编辑：启用流式输出（实时推送 token）
+        - 渠道不支持消息编辑但开启了啰嗦模式：也需要启用流式输出，
+          以便在工具调用前捕获 Agent 的中间文字并随工具消息一起发送
+        - 其他情况不启用流式输出
+        """
+        if self.is_background:
+            return False
+        # 啰嗦模式下始终需要流式输出来捕获工具调用前的 Agent 文字
+        if settings.AI_AGENT_VERBOSE:
+            return True
+        try:
+            channel_enum = MessageChannel(self.channel)
+            return ChannelCapabilityManager.supports_capability(
+                channel_enum, ChannelCapability.MESSAGE_EDITING
+            )
+        except (ValueError, KeyError):
+            return False
 
     @staticmethod
-    def _initialize_llm():
+    def _initialize_llm(streaming: bool = False):
         """
-        初始化 LLM（带流式回调）
+        初始化 LLM
+        :param streaming: 是否启用流式输出
         """
-        return LLMHelper.get_llm(streaming=True)
+        return LLMHelper.get_llm(streaming=streaming)
 
     @staticmethod
     def _extract_text_content(content) -> str:
@@ -191,16 +216,17 @@ class MoviePilotAgent:
             stream_handler=self.stream_handler,
         )
 
-    def _create_agent(self):
+    def _create_agent(self, streaming: bool = False):
         """
         创建 LangGraph Agent（使用 create_agent + SummarizationMiddleware）
+        :param streaming: 是否启用流式输出
         """
         try:
             # 系统提示词
             system_prompt = prompt_manager.get_agent_prompt(channel=self.channel)
 
             # LLM 模型（用于 agent 执行）
-            llm = self._initialize_llm()
+            llm = self._initialize_llm(streaming=streaming)
 
             # 工具列表
             tools = self._initialize_tools()
@@ -344,9 +370,11 @@ class MoviePilotAgent:
 
     async def _execute_agent(self, messages: List[BaseMessage]):
         """
-        调用 LangGraph Agent，通过 astream 流式获取 token。
-        支持流式输出：在支持消息编辑的渠道上实时推送 token。
-        后台任务模式（无渠道信息）：不进行流式输出，仅广播最终结果。
+        调用 LangGraph Agent 执行推理。
+        根据运行环境选择不同的执行模式：
+        - 后台任务模式（无渠道信息）：非流式 LLM + ainvoke，仅广播最终结果
+        - 渠道不支持消息编辑：非流式 LLM + ainvoke，完成后发送最终回复
+        - 渠道支持消息编辑：流式 LLM + astream，实时推送 token
         """
         try:
             # Agent运行配置
@@ -356,39 +384,14 @@ class MoviePilotAgent:
                 }
             }
 
-            # 创建智能体
-            agent = self._create_agent()
+            # 判断是否启用流式输出
+            use_streaming = self._should_stream()
 
-            if self.is_background:
-                # 后台任务模式：非流式执行，等待完成后只取最后一条AI回复
-                await agent.ainvoke(
-                    {"messages": messages},
-                    config=agent_config,
-                )
+            # 创建智能体（根据是否流式传入不同 LLM）
+            agent = self._create_agent(streaming=use_streaming)
 
-                # 从最终状态中提取最后一条AI回复内容
-                final_messages = agent.get_state(agent_config).values.get(
-                    "messages", []
-                )
-                final_text = ""
-                for msg in reversed(final_messages):
-                    if hasattr(msg, "type") and msg.type == "ai" and msg.content:
-                        # 过滤掉思考/推理内容，只提取纯文本
-                        text = self._extract_text_content(msg.content)
-                        if text:
-                            # 过滤掉包含在 <think> 标签中的内容
-                            text = re.sub(
-                                r"<think>.*?(?:</think>|$)", "", text, flags=re.DOTALL
-                            )
-                            final_text = text.strip()
-                            break
-
-                # 后台任务仅广播最终回复，带标题
-                if final_text:
-                    await self.send_agent_message(final_text, title="MoviePilot助手")
-
-            else:
-                # 正常渠道模式：启动流式输出
+            if use_streaming:
+                # 流式模式：渠道支持消息编辑，启动流式输出实时推送 token
                 await self.stream_handler.start_streaming(
                     channel=self.channel,
                     source=self.source,
@@ -411,7 +414,7 @@ class MoviePilotAgent:
                 ) = await self.stream_handler.stop_streaming()
 
                 if not all_sent_via_stream:
-                    # 流式输出未能发送全部内容（渠道不支持编辑，或发送失败）
+                    # 流式输出未能发送全部内容（发送失败等）
                     # 通过常规方式发送剩余内容
                     remaining_text = await self.stream_handler.take()
                     if remaining_text:
@@ -419,6 +422,40 @@ class MoviePilotAgent:
                 elif streamed_text:
                     # 流式输出已发送全部内容，但未记录到数据库，补充保存消息记录
                     await self._save_agent_message_to_db(streamed_text)
+
+            else:
+                # 非流式模式：后台任务或渠道不支持消息编辑
+                await agent.ainvoke(
+                    {"messages": messages},
+                    config=agent_config,
+                )
+
+                # 从最终状态中提取最后一条AI回复内容
+                final_messages = agent.get_state(agent_config).values.get(
+                    "messages", []
+                )
+                final_text = ""
+                for msg in reversed(final_messages):
+                    if hasattr(msg, "type") and msg.type == "ai" and msg.content:
+                        # 过滤掉思考/推理内容，只提取纯文本
+                        text = self._extract_text_content(msg.content)
+                        if text:
+                            # 过滤掉包含在 <think> 标签中的内容
+                            text = re.sub(
+                                r"<think>.*?(?:</think>|$)", "", text, flags=re.DOTALL
+                            )
+                            final_text = text.strip()
+                            break
+
+                if final_text:
+                    if self.is_background:
+                        # 后台任务仅广播最终回复，带标题
+                        await self.send_agent_message(
+                            final_text, title="MoviePilot助手"
+                        )
+                    else:
+                        # 非流式渠道：发送最终回复
+                        await self.send_agent_message(final_text)
 
             # 保存消息
             memory_manager.save_agent_messages(
@@ -435,8 +472,7 @@ class MoviePilotAgent:
             return str(e), {}
         finally:
             # 确保停止流式输出
-            if not self.is_background:
-                await self.stream_handler.stop_streaming()
+            await self.stream_handler.stop_streaming()
 
     async def send_agent_message(self, message: str, title: str = ""):
         """
@@ -506,12 +542,21 @@ class AgentManager:
     同一会话的消息按顺序排队处理，不同会话之间互不影响。
     """
 
+    # 批量重试整理的等待时间（秒），同一批次内的失败记录会合并为一次agent调用
+    RETRY_TRANSFER_DEBOUNCE_SECONDS = 300
+
     def __init__(self):
         self.active_agents: Dict[str, MoviePilotAgent] = {}
         # 每个会话的消息队列
         self._session_queues: Dict[str, asyncio.Queue] = {}
         # 每个会话的worker任务
         self._session_workers: Dict[str, asyncio.Task] = {}
+        # 重试整理的 debounce 缓冲区: group_key -> List[history_id]
+        self._retry_transfer_buffer: Dict[str, List[int]] = {}
+        # 重试整理的 debounce 定时器: group_key -> asyncio.TimerHandle
+        self._retry_transfer_timers: Dict[str, asyncio.TimerHandle] = {}
+        # 重试整理缓冲区锁
+        self._retry_transfer_lock = asyncio.Lock()
 
     @staticmethod
     async def initialize():
@@ -525,6 +570,11 @@ class AgentManager:
         关闭管理器
         """
         await memory_manager.close()
+        # 取消所有重试整理的延迟定时器
+        for timer in self._retry_transfer_timers.values():
+            timer.cancel()
+        self._retry_transfer_timers.clear()
+        self._retry_transfer_buffer.clear()
         # 取消所有会话worker
         for task in self._session_workers.values():
             task.cancel()
@@ -779,40 +829,111 @@ class AgentManager:
         except Exception as e:
             logger.error(f"智能体心跳唤醒失败: {e}")
 
-    async def retry_failed_transfer(self, history_id: int):
+    async def retry_failed_transfer(self, history_id: int, group_key: str = ""):
         """
         触发智能体重新整理失败的历史记录。
-        由文件整理模块在检测到整理失败后调用，使用独立会话执行。
+        由文件整理模块在检测到整理失败后调用。
+        同一 group_key 的失败记录会在缓冲期内合并为一次agent调用，避免重复浪费token。
         :param history_id: 失败的整理历史记录ID
+        :param group_key: 分组键，相同key的记录会被合并处理（如download_hash、源目录等）
         """
+        if not group_key:
+            group_key = f"_default_{history_id}"
+
+        async with self._retry_transfer_lock:
+            # 将 history_id 加入缓冲区
+            if group_key not in self._retry_transfer_buffer:
+                self._retry_transfer_buffer[group_key] = []
+            if history_id not in self._retry_transfer_buffer[group_key]:
+                self._retry_transfer_buffer[group_key].append(history_id)
+                logger.info(
+                    f"智能体重试整理：记录 ID={history_id} 已加入缓冲区 "
+                    f"(group={group_key}, 当前{len(self._retry_transfer_buffer[group_key])}条)"
+                )
+
+            # 取消该分组的旧定时器
+            if group_key in self._retry_transfer_timers:
+                self._retry_transfer_timers[group_key].cancel()
+
+            # 设置新的延迟定时器
+            loop = asyncio.get_running_loop()
+            self._retry_transfer_timers[group_key] = loop.call_later(
+                self.RETRY_TRANSFER_DEBOUNCE_SECONDS,
+                lambda gk=group_key: asyncio.ensure_future(
+                    self._flush_retry_transfer(gk)
+                ),
+            )
+
+    async def _flush_retry_transfer(self, group_key: str):
+        """
+        延迟定时器到期后，取出该分组的所有 history_id 并合并为一次agent调用。
+        """
+        async with self._retry_transfer_lock:
+            history_ids = self._retry_transfer_buffer.pop(group_key, [])
+            self._retry_transfer_timers.pop(group_key, None)
+
+        if not history_ids:
+            return
+
         try:
-            # 每次使用唯一的 session_id，避免共享上下文
-            session_id = f"__agent_retry_transfer_{history_id}_{uuid.uuid4().hex[:8]}__"
+            session_id = f"__agent_retry_transfer_batch_{uuid.uuid4().hex[:8]}__"
             user_id = "system"
 
-            logger.info(f"智能体重试整理：开始处理失败记录 ID={history_id} ...")
-
-            # 英文提示词，便于大模型理解
-            retry_message = (
-                f"[System Task - Transfer Failed Retry] A file transfer/organization has failed. "
-                f"Please use the 'transfer-failed-retry' skill to retry the failed transfer.\n\n"
-                f"Failed transfer history record ID: {history_id}\n\n"
-                f"Follow these steps:\n"
-                f"1. Use `query_transfer_history` with status='failed' to find the record with id={history_id} "
-                f"and understand the failure details (source path, error message, media info)\n"
-                f"2. Analyze the error message to determine the best retry strategy\n"
-                f"3. If the source file no longer exists, skip this retry and report that the file is missing\n"
-                f"4. Delete the failed history record using `delete_transfer_history` with history_id={history_id}\n"
-                f"5. Re-identify the media using `recognize_media` with the source file path\n"
-                f"6. If recognition fails, try `search_media` with keywords from the filename\n"
-                f"7. Re-transfer using `transfer_file` with the source path and any identified media info (tmdbid, media_type)\n"
-                f"8. Report the final result\n\n"
-                f"IMPORTANT: This is a background system task, NOT a user conversation. "
-                f"Your final response will be broadcast as a notification. "
-                f"Only output a brief result summary. "
-                f"Do NOT include greetings, explanations, or conversational text. "
-                f"Respond in Chinese (中文)."
+            ids_str = ", ".join(str(i) for i in history_ids)
+            logger.info(
+                f"智能体重试整理：开始批量处理失败记录 IDs=[{ids_str}] (group={group_key})"
             )
+
+            if len(history_ids) == 1:
+                # 单条记录，使用原有逻辑
+                retry_message = (
+                    f"[System Task - Transfer Failed Retry] A file transfer/organization has failed. "
+                    f"Please use the 'transfer-failed-retry' skill to retry the failed transfer.\n\n"
+                    f"Failed transfer history record ID: {history_ids[0]}\n\n"
+                    f"Follow these steps:\n"
+                    f"1. Use `query_transfer_history` with status='failed' to find the record with id={history_ids[0]} "
+                    f"and understand the failure details (source path, error message, media info)\n"
+                    f"2. Analyze the error message to determine the best retry strategy\n"
+                    f"3. If the source file no longer exists, skip this retry and report that the file is missing\n"
+                    f"4. Delete the failed history record using `delete_transfer_history` with history_id={history_ids[0]}\n"
+                    f"5. Re-identify the media using `recognize_media` with the source file path\n"
+                    f"6. If recognition fails, try `search_media` with keywords from the filename\n"
+                    f"7. Re-transfer using `transfer_file` with the source path and any identified media info (tmdbid, media_type)\n"
+                    f"8. Report the final result\n\n"
+                    f"IMPORTANT: This is a background system task, NOT a user conversation. "
+                    f"Your final response will be broadcast as a notification. "
+                    f"Only output a brief result summary. "
+                    f"Do NOT include greetings, explanations, or conversational text. "
+                    f"Respond in Chinese (中文)."
+                )
+            else:
+                # 多条记录，使用批量处理逻辑
+                retry_message = (
+                    f"[System Task - Batch Transfer Failed Retry] Multiple file transfers from the same source "
+                    f"have failed. These files likely belong to the SAME media (e.g., multiple episodes of the same TV show). "
+                    f"Please use the 'transfer-failed-retry' skill to retry them efficiently.\n\n"
+                    f"Failed transfer history record IDs: {ids_str}\n"
+                    f"Total failed records: {len(history_ids)}\n\n"
+                    f"Follow these steps:\n"
+                    f"1. Use `query_transfer_history` with status='failed' to find ALL records with these IDs "
+                    f"and understand the failure details\n"
+                    f"2. Since these files are likely from the same media, analyze the FIRST record to determine "
+                    f"the media identity and the best retry strategy. The root cause is usually the same for all files.\n"
+                    f"3. If the error is about media recognition (e.g., '未识别到媒体信息'), identify the media ONCE "
+                    f"using `recognize_media` or `search_media`, then reuse that result (tmdbid, media_type) for all files\n"
+                    f"4. For EACH failed record:\n"
+                    f"   a. Delete the failed history record using `delete_transfer_history`\n"
+                    f"   b. Re-transfer using `transfer_file` with the source path and the identified media info\n"
+                    f"5. Report a summary of results (how many succeeded, how many failed)\n\n"
+                    f"IMPORTANT OPTIMIZATION: These files share the same media identity. "
+                    f"Do NOT call `recognize_media` or `search_media` repeatedly for each file. "
+                    f"Identify the media ONCE, then apply to all files.\n\n"
+                    f"IMPORTANT: This is a background system task, NOT a user conversation. "
+                    f"Your final response will be broadcast as a notification. "
+                    f"Only output a brief result summary. "
+                    f"Do NOT include greetings, explanations, or conversational text. "
+                    f"Respond in Chinese (中文)."
+                )
 
             await self.process_message(
                 session_id=session_id,
@@ -834,13 +955,17 @@ class AgentManager:
                 except asyncio.CancelledError:
                     pass
 
-            logger.info(f"智能体重试整理：记录 ID={history_id} 处理完成")
+            logger.info(
+                f"智能体重试整理：批量处理完成 IDs=[{ids_str}] (group={group_key})"
+            )
 
             # 用完即弃，清理资源
             await self.clear_session(session_id, user_id)
 
         except Exception as e:
-            logger.error(f"智能体重试整理失败 (ID={history_id}): {e}")
+            logger.error(
+                f"智能体重试整理失败 (IDs=[{ids_str}], group={group_key}): {e}"
+            )
 
 
 # 全局智能体管理器实例
