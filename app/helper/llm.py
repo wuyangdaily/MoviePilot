@@ -60,6 +60,13 @@ class LLMHelper:
     """LLM模型相关辅助功能"""
 
     @staticmethod
+    def supports_image_input() -> bool:
+        """
+        判断当前模型是否启用了图片输入能力。
+        """
+        return bool(settings.LLM_SUPPORT_IMAGE_INPUT)
+
+    @staticmethod
     def get_llm(streaming: bool = False):
         """
         获取LLM实例
@@ -121,7 +128,7 @@ class LLMHelper:
 
         # 检查是否有profile
         if hasattr(model, "profile") and model.profile:
-            logger.info(f"使用LLM模型: {model.model}，Profile: {model.profile}")
+            logger.debug(f"使用LLM模型: {model.model}，Profile: {model.profile}")
         else:
             model.profile = {
                 "max_input_tokens": settings.LLM_MAX_CONTEXT_TOKENS

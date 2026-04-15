@@ -1,9 +1,12 @@
 import asyncio
+import mimetypes
 import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Optional, Dict, Union, List
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
+import uuid
 
 import base64
 
@@ -18,6 +21,7 @@ from app.core.context import MediaInfo, Context
 from app.core.meta import MetaBase
 from app.db.user_oper import UserOper
 from app.helper.torrent import TorrentHelper
+from app.helper.llm import LLMHelper
 from app.helper.voice import VoiceHelper
 from app.log import logger
 from app.schemas import Notification, NotExistMediaInfo, CommingMessage
@@ -135,7 +139,8 @@ class MessageChain(ChainBase):
         text = str(info.text).strip() if info.text else ""
         images = info.images
         audio_refs = info.audio_refs
-        if not text and not images and not audio_refs:
+        files = info.files
+        if not text and not images and not audio_refs and not files:
             logger.debug(f"未识别到消息内容：：{body}{form}{args}")
             return
 
@@ -154,6 +159,7 @@ class MessageChain(ChainBase):
             original_chat_id=original_chat_id,
             images=images,
             audio_refs=audio_refs,
+            files=files,
         )
 
     def handle_message(
@@ -165,8 +171,9 @@ class MessageChain(ChainBase):
         text: str,
         original_message_id: Optional[Union[str, int]] = None,
         original_chat_id: Optional[str] = None,
-        images: Optional[List[str]] = None,
+        images: Optional[List[CommingMessage.MessageImage]] = None,
         audio_refs: Optional[List[str]] = None,
+        files: Optional[List[CommingMessage.MessageAttachment]] = None,
     ) -> None:
         """
         识别消息内容，执行操作
@@ -178,6 +185,8 @@ class MessageChain(ChainBase):
         user_cache: Dict[str, dict] = self.load_cache(self._cache_file) or {}
 
         try:
+            images = CommingMessage.MessageImage.normalize_list(images)
+
             # 识别语音为文本
             reply_with_voice = bool(audio_refs)
             if audio_refs:
@@ -253,9 +262,12 @@ class MessageChain(ChainBase):
                     userid=userid,
                     username=username,
                     images=images,
+                    files=files,
                     reply_with_voice=reply_with_voice,
                 )
-            elif settings.AI_AGENT_ENABLE and settings.AI_AGENT_GLOBAL:
+            elif settings.AI_AGENT_ENABLE and (
+                settings.AI_AGENT_GLOBAL or images or files
+            ):
                 # 普通消息，全局智能体响应
                 self._handle_ai_message(
                     text=text,
@@ -264,6 +276,7 @@ class MessageChain(ChainBase):
                     userid=userid,
                     username=username,
                     images=images,
+                    files=files,
                     reply_with_voice=reply_with_voice,
                 )
             else:
@@ -1229,7 +1242,8 @@ class MessageChain(ChainBase):
         source: str,
         userid: Union[str, int],
         username: str,
-        images: Optional[List[str]] = None,
+        images: Optional[List[CommingMessage.MessageImage]] = None,
+        files: Optional[List[CommingMessage.MessageAttachment]] = None,
         reply_with_voice: bool = False,
     ) -> None:
         """
@@ -1249,13 +1263,15 @@ class MessageChain(ChainBase):
                 )
                 return
 
+            images = CommingMessage.MessageImage.normalize_list(images)
+
             # 提取用户消息
             if text.lower().startswith("/ai"):
                 user_message = text[3:].strip()  # 移除 "/ai" 前缀（大小写不敏感）
             else:
                 user_message = text.strip()  # 按原消息处理
 
-            if not user_message and not images:
+            if not user_message and not images and not files:
                 self.post_message(
                     Notification(
                         channel=channel,
@@ -1272,9 +1288,10 @@ class MessageChain(ChainBase):
 
             # 下载图片并转为base64
             original_images = images
-            if images:
+            all_files = list(files or [])
+            if images and LLMHelper.supports_image_input():
                 images = self._download_images_to_base64(images, channel, source)
-                if original_images and not images and not user_message:
+                if original_images and not images and not user_message and not files:
                     self.post_message(
                         Notification(
                             channel=channel,
@@ -1285,6 +1302,39 @@ class MessageChain(ChainBase):
                         )
                     )
                     return
+            elif images:
+                image_attachments = self._build_image_attachments(images)
+                if original_images and not image_attachments and not user_message and not files:
+                    self.post_message(
+                        Notification(
+                            channel=channel,
+                            source=source,
+                            userid=userid,
+                            username=username,
+                            title="图片读取失败，请稍后重试",
+                        )
+                    )
+                    return
+                all_files.extend(image_attachments)
+                images = None
+
+            prepared_files = self._prepare_agent_files(
+                session_id=session_id,
+                files=all_files,
+                channel=channel,
+                source=source,
+            )
+            if all_files and not prepared_files and not user_message and not images:
+                self.post_message(
+                    Notification(
+                        channel=channel,
+                        source=source,
+                        userid=userid,
+                        username=username,
+                        title="文件读取失败，请稍后重试",
+                    )
+                )
+                return
 
             # 在事件循环中处理
             asyncio.run_coroutine_threadsafe(
@@ -1293,6 +1343,7 @@ class MessageChain(ChainBase):
                     user_id=str(userid),
                     message=user_message,
                     images=images,
+                    files=prepared_files,
                     channel=channel.value if channel else None,
                     source=source,
                     username=username,
@@ -1423,15 +1474,20 @@ class MessageChain(ChainBase):
         return default
 
     def _download_images_to_base64(
-        self, images: List[str], channel: MessageChannel, source: str
+        self,
+        images: List[CommingMessage.MessageImage],
+        channel: MessageChannel,
+        source: str,
     ) -> List[str]:
         """
         下载图片并转为base64
         """
+        images = CommingMessage.MessageImage.normalize_list(images)
         if not images:
             return None
         base64_images = []
-        for img in images:
+        for image in images:
+            img = image.ref
             try:
                 if img.startswith("data:"):
                     base64_images.append(img)
@@ -1481,3 +1537,248 @@ class MessageChain(ChainBase):
             except Exception as e:
                 logger.error(f"下载图片失败: {img}, error: {e}")
         return base64_images if base64_images else None
+
+    def _build_image_attachments(
+        self, images: List[CommingMessage.MessageImage]
+    ) -> List[CommingMessage.MessageAttachment]:
+        """
+        将图片引用转换为附件描述，以便按文件方式交给 Agent 处理。
+        """
+        images = CommingMessage.MessageImage.normalize_list(images)
+        if not images:
+            return []
+
+        attachments = []
+        for index, image in enumerate(images, start=1):
+            image_ref = image.ref
+            if not image_ref:
+                continue
+            name = image.name or self._guess_image_attachment_name(image_ref, index)
+            mime_type = image.mime_type or self._guess_image_mime_type(image_ref, name)
+            attachments.append(
+                CommingMessage.MessageAttachment(
+                    ref=image_ref,
+                    name=name,
+                    mime_type=mime_type,
+                    size=image.size,
+                )
+            )
+        return attachments
+
+    def _prepare_agent_files(
+        self,
+        session_id: str,
+        files: Optional[List[CommingMessage.MessageAttachment]],
+        channel: MessageChannel,
+        source: str,
+    ) -> Optional[List[dict]]:
+        """
+        下载用户上传的文件，落盘到临时目录，并生成文本镜像供 Agent 使用。
+        """
+        if not files:
+            return None
+
+        prepared_files = []
+        for attachment in files:
+            payload = {
+                "name": attachment.name,
+                "mime_type": attachment.mime_type,
+                "size": attachment.size,
+                "ref": attachment.ref,
+                "status": "download_failed",
+            }
+            try:
+                content = self._download_message_file_bytes(
+                    file_ref=attachment.ref,
+                    channel=channel,
+                    source=source,
+                )
+                if not content:
+                    prepared_files.append(payload)
+                    continue
+
+                local_path = self._save_agent_attachment(
+                    session_id=session_id,
+                    filename=attachment.name,
+                    content=content,
+                    mime_type=attachment.mime_type,
+                )
+                payload.update(
+                    {
+                        "local_path": str(local_path),
+                        "status": "ready",
+                    }
+                )
+            except Exception as err:
+                logger.error(f"准备文件上下文失败: {attachment.ref}, error: {err}")
+                payload["error"] = str(err)
+            prepared_files.append(payload)
+
+        return prepared_files or None
+
+    def _download_message_file_bytes(
+        self, file_ref: str, channel: MessageChannel, source: str
+    ) -> Optional[bytes]:
+        """
+        下载消息附件的原始字节。
+        """
+        if not file_ref:
+            return None
+        if file_ref.startswith("data:"):
+            return self._decode_data_url_bytes(file_ref)
+        if file_ref.startswith("tg://file_id/"):
+            file_id = file_ref.replace("tg://file_id/", "", 1)
+            return self.run_module(
+                "download_telegram_file_bytes", file_id=file_id, source=source
+            )
+        if file_ref.startswith("tg://document_file_id/"):
+            file_id = file_ref.replace("tg://document_file_id/", "", 1)
+            return self.run_module(
+                "download_telegram_file_bytes", file_id=file_id, source=source
+            )
+        if file_ref.startswith("wxwork://media_id/"):
+            return self.run_module(
+                "download_wechat_media_bytes", media_ref=file_ref, source=source
+            )
+        if file_ref.startswith("wxwork://file_media_id/"):
+            return self.run_module(
+                "download_wechat_media_bytes", media_ref=file_ref, source=source
+            )
+        if file_ref.startswith("wxbot://image/"):
+            data_url = self.run_module(
+                "download_wechat_image_to_data_url", image_ref=file_ref, source=source
+            )
+            return self._decode_data_url_bytes(data_url) if data_url else None
+        if file_ref.startswith("wxbot://file/"):
+            file_url = unquote(file_ref.replace("wxbot://file/", "", 1))
+            resp = RequestUtils(timeout=30).get_res(file_url)
+            return resp.content if resp and resp.content else None
+        if file_ref.startswith("slack://file/"):
+            return self.run_module(
+                "download_slack_file_bytes", file_ref=file_ref, source=source
+            )
+        if file_ref.startswith("discord://file/"):
+            return self.run_module(
+                "download_discord_file_bytes", file_ref=file_ref, source=source
+            )
+        if file_ref.startswith("qq://file/"):
+            return self.run_module(
+                "download_qq_file_bytes", file_ref=file_ref, source=source
+            )
+        if file_ref.startswith("vocechat://file/"):
+            return self.run_module(
+                "download_vocechat_file_bytes", file_ref=file_ref, source=source
+            )
+        if file_ref.startswith("synology://file/"):
+            return self.run_module(
+                "download_synologychat_file_bytes", file_ref=file_ref, source=source
+            )
+        if file_ref.startswith("http"):
+            if channel == MessageChannel.Slack:
+                data_url = self.run_module(
+                    "download_slack_file_to_data_url", file_url=file_ref, source=source
+                )
+                return self._decode_data_url_bytes(data_url) if data_url else None
+            resp = RequestUtils(timeout=30).get_res(file_ref)
+            return resp.content if resp and resp.content else None
+        logger.debug(
+            "暂不支持的文件引用: channel=%s, source=%s, ref=%s",
+            channel.value if channel else None,
+            source,
+            file_ref,
+        )
+        return None
+
+    def _save_agent_attachment(
+        self,
+        session_id: str,
+        filename: Optional[str],
+        content: bytes,
+        mime_type: Optional[str] = None,
+    ) -> Path:
+        """
+        将用户上传文件写入临时目录，并返回本地路径。
+        """
+        safe_name = self._sanitize_attachment_name(filename, mime_type)
+        base_dir = settings.TEMP_PATH / "agent_uploads" / session_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        file_id = uuid.uuid4().hex[:8]
+        local_path = base_dir / f"{file_id}_{safe_name}"
+        local_path.write_bytes(content or b"")
+        return local_path
+
+    @staticmethod
+    def _sanitize_attachment_name(
+        filename: Optional[str], mime_type: Optional[str] = None
+    ) -> str:
+        """
+        规范化附件文件名，避免路径穿越和非法字符。
+        """
+        name = Path(filename or "attachment").name
+        name = re.sub(r"[^\w.\-]+", "_", name, flags=re.ASCII).strip("._")
+        if not name:
+            name = "attachment"
+        if "." not in name:
+            mime = (mime_type or "").split(";", 1)[0].strip().lower()
+            default_ext = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+                "image/bmp": ".bmp",
+                "application/json": ".json",
+                "text/plain": ".txt",
+                "text/markdown": ".md",
+                "text/csv": ".csv",
+            }.get(mime)
+            if default_ext:
+                name = f"{name}{default_ext}"
+        return name
+
+    @staticmethod
+    def _guess_image_attachment_name(image_ref: str, index: int) -> str:
+        """
+        根据图片引用推测附件名。
+        """
+        if not image_ref:
+            return f"image_{index}.jpg"
+        if image_ref.startswith("data:"):
+            mime_part = image_ref[5:].split(";", 1)[0].strip().lower()
+            ext = mimetypes.guess_extension(mime_part) or ".jpg"
+            return f"image_{index}{ext}"
+
+        parsed = urlparse(unquote(image_ref))
+        name = Path(parsed.path).name if parsed.path else ""
+        if name and "." in name:
+            return name
+        return f"image_{index}.jpg"
+
+    @staticmethod
+    def _guess_image_mime_type(image_ref: str, filename: Optional[str]) -> str:
+        """
+        根据图片引用或文件名推测 MIME 类型。
+        """
+        if image_ref and image_ref.startswith("data:"):
+            mime = image_ref[5:].split(";", 1)[0].strip().lower()
+            return mime or "image/jpeg"
+        guessed, _ = mimetypes.guess_type(filename or "")
+        if guessed and guessed.startswith("image/"):
+            return guessed
+        return "image/jpeg"
+
+    @staticmethod
+    def _decode_data_url_bytes(data_url: Optional[str]) -> Optional[bytes]:
+        """
+        将 data URL 解码为原始字节。
+        """
+        if not data_url or not data_url.startswith("data:"):
+            return None
+        try:
+            _, payload = data_url.split(",", 1)
+        except ValueError:
+            return None
+        try:
+            return base64.b64decode(payload)
+        except Exception:
+            return None
