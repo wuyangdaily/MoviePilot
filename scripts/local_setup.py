@@ -15,8 +15,10 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import textwrap
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Optional
@@ -74,6 +76,183 @@ RUNTIME_PACKAGE = {
         "express-http-proxy": "^2.0.0",
     },
 }
+LOCAL_FRONTEND_SERVICE_SCRIPT = textwrap.dedent(
+    """
+    const http = require('node:http')
+    const path = require('node:path')
+    const express = require('express')
+    const proxy = require('express-http-proxy')
+
+    const app = express()
+    const backendHost = process.env.MOVIEPILOT_BACKEND_HOST || '127.0.0.1'
+    const backendPort = Number(process.env.PORT || 3001)
+    const frontendPort = Number(process.env.NGINX_PORT || 3000)
+    const backendHealthPath = '/api/v1/system/global?token=moviepilot'
+    const backendHealthTimeoutMs = Number(process.env.MOVIEPILOT_FRONTEND_HEALTH_TIMEOUT_MS || 3000)
+    const backendHealthIntervalMs = Number(process.env.MOVIEPILOT_FRONTEND_HEALTH_INTERVAL_MS || 15000)
+    const backendMaxFailures = Math.max(
+      Number(process.env.MOVIEPILOT_FRONTEND_MAX_FAILURES || 4),
+      1
+    )
+
+    function sleep (ms) {
+      return new Promise(resolve => setTimeout(resolve, ms))
+    }
+
+    function checkBackendHealth () {
+      return new Promise(resolve => {
+        const request = http.request(
+          {
+            host: backendHost,
+            port: backendPort,
+            path: backendHealthPath,
+            method: 'GET',
+            timeout: backendHealthTimeoutMs
+          },
+          response => {
+            let body = ''
+            response.setEncoding('utf8')
+            response.on('data', chunk => {
+              body += chunk
+            })
+            response.on('end', () => {
+              if (response.statusCode !== 200) {
+                resolve(false)
+                return
+              }
+
+              try {
+                const payload = JSON.parse(body)
+                resolve(payload?.success !== false)
+              } catch (error) {
+                // 健康检查接口只要返回 200，就允许继续提供前端服务。
+                resolve(true)
+              }
+            })
+          }
+        )
+
+        request.on('timeout', () => {
+          request.destroy(new Error('backend health check timeout'))
+        })
+        request.on('error', () => {
+          resolve(false)
+        })
+        request.end()
+      })
+    }
+
+    async function waitForBackendReady () {
+      for (let attempt = 1; attempt <= backendMaxFailures; attempt += 1) {
+        if (await checkBackendHealth()) {
+          return true
+        }
+
+        if (attempt < backendMaxFailures) {
+          await sleep(1000)
+        }
+      }
+      return false
+    }
+
+    function startBackendWatchdog (server) {
+      let consecutiveFailures = 0
+      let checking = false
+
+      const timer = setInterval(async () => {
+        if (checking) {
+          return
+        }
+
+        checking = true
+        try {
+          const healthy = await checkBackendHealth()
+          if (healthy) {
+            consecutiveFailures = 0
+            return
+          }
+
+          consecutiveFailures += 1
+          console.warn(
+            `Backend health check failed (${consecutiveFailures}/${backendMaxFailures})`
+          )
+
+          if (consecutiveFailures < backendMaxFailures) {
+            return
+          }
+
+          clearInterval(timer)
+          console.error('Backend is unavailable, stopping frontend service')
+          server.close(() => process.exit(1))
+          setTimeout(() => process.exit(1), 1000).unref()
+        } finally {
+          checking = false
+        }
+      }, backendHealthIntervalMs)
+
+      timer.unref()
+
+      const shutdown = signal => {
+        clearInterval(timer)
+        console.log(`Received ${signal}, shutting down frontend service`)
+        server.close(() => process.exit(0))
+        setTimeout(() => process.exit(0), 1000).unref()
+      }
+
+      process.on('SIGINT', () => shutdown('SIGINT'))
+      process.on('SIGTERM', () => shutdown('SIGTERM'))
+    }
+
+    // 静态文件服务目录
+    app.use(express.static(__dirname))
+
+    // 配置代理中间件将请求转发给后端 API。
+    app.use(
+      '/api',
+      proxy(`${backendHost}:${backendPort}`, {
+        proxyReqPathResolver: req => `/api${req.url}`
+      })
+    )
+
+    // 配置代理中间件将 CookieCloud 请求转发给后端 API。
+    app.use(
+      '/cookiecloud',
+      proxy(`${backendHost}:${backendPort}`, {
+        proxyReqPathResolver: req => `/cookiecloud${req.url}`
+      })
+    )
+
+    // 处理根路径的请求。
+    app.get('/', (req, res) => {
+      res.sendFile(path.join(__dirname, 'index.html'))
+    })
+
+    // 处理所有其他请求，重定向到前端入口文件。
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(__dirname, 'index.html'))
+    })
+
+    async function bootstrap () {
+      // 前端本地代理不再允许单独存活，避免设备重启后只剩前端进程。
+      const backendReady = await waitForBackendReady()
+      if (!backendReady) {
+        console.error('Backend is unavailable, skip starting frontend service')
+        process.exit(1)
+      }
+
+      const server = app.listen(frontendPort, () => {
+        console.log(`Server is running on port ${frontendPort}`)
+      })
+
+      startBackendWatchdog(server)
+    }
+
+    bootstrap().catch(error => {
+      console.error(`Failed to start frontend service: ${error?.message || error}`)
+      process.exit(1)
+    })
+    """
+).lstrip()
 NOTIFICATION_SWITCH_TYPES = [
     "资源下载",
     "整理入库",
@@ -85,6 +264,17 @@ NOTIFICATION_SWITCH_TYPES = [
     "智能体",
     "其它",
 ]
+UNINSTALL_CONFIRM_TEXT = "UNINSTALL"
+RESOURCE_FILE_PATTERNS = ("sites*", "user.sites*.bin")
+AUTOSTART_ENV_KEY = "MOVIEPILOT_AUTO_START"
+AUTOSTART_RUNTIME_DIR = RUNTIME_DIR / "startup"
+AUTOSTART_UNIX_LAUNCHER = AUTOSTART_RUNTIME_DIR / "moviepilot-start.sh"
+AUTOSTART_WINDOWS_LAUNCHER = AUTOSTART_RUNTIME_DIR / "moviepilot-start.cmd"
+AUTOSTART_TIMEOUT = 120
+MACOS_LAUNCH_AGENT_LABEL = "org.moviepilot.localcli"
+LINUX_SYSTEMD_UNIT_NAME = "moviepilot-autostart.service"
+LINUX_XDG_AUTOSTART_FILENAME = "moviepilot.desktop"
+WINDOWS_STARTUP_FILENAME = "MoviePilot Startup.cmd"
 
 
 def _default_config_dir() -> Path:
@@ -199,6 +389,31 @@ def configure_config_dir(
     if persist:
         _write_install_env(config_dir)
     return config_dir
+
+
+def resolve_config_dir(
+    explicit: Optional[Path] = None,
+    *,
+    prefer_external: bool = False,
+) -> Path:
+    """
+    解析当前命令应使用的配置目录，但不写入环境变量或安装元数据。
+
+    该函数用于交互式命令在真正持久化配置目录前，先给用户展示默认值。
+    """
+    if explicit:
+        return explicit.expanduser().resolve()
+    if os.getenv("CONFIG_DIR"):
+        return Path(os.environ["CONFIG_DIR"]).expanduser().resolve()
+
+    install_env_dir = _read_install_env_config_dir()
+    if install_env_dir:
+        return install_env_dir.resolve()
+    if prefer_external:
+        return _default_config_dir().resolve()
+    if _legacy_runtime_config_exists():
+        return LEGACY_CONFIG_DIR.resolve()
+    return _default_config_dir().resolve()
 
 
 configure_config_dir()
@@ -462,6 +677,16 @@ def _frontend_runtime_ready(frontend_version: str) -> bool:
         return False
 
 
+def _write_local_frontend_service_script(target_dir: Path) -> None:
+    """
+    覆盖前端 release 自带的 service.js，统一使用本地 CLI 的受控代理脚本。
+    """
+    (target_dir / "service.js").write_text(
+        LOCAL_FRONTEND_SERVICE_SCRIPT,
+        encoding="utf-8",
+    )
+
+
 def _node_platform() -> tuple[str, str]:
     system_name = platform.system().lower()
     machine = platform.machine().lower()
@@ -534,6 +759,7 @@ def install_frontend(frontend_version: str, node_version: str) -> dict[str, str]
     node_bin = install_node_runtime(node_version)
 
     if _frontend_runtime_ready(version_tag):
+        _write_local_frontend_service_script(PUBLIC_DIR)
         print_step(f"前端发布包已是最新版本：{version_tag}")
         return {"version": version_tag, "node": str(node_bin)}
 
@@ -549,6 +775,8 @@ def install_frontend(frontend_version: str, node_version: str) -> dict[str, str]
             raise RuntimeError("前端发布包中未找到 dist 目录")
         _remove_path(PUBLIC_DIR)
         shutil.move(str(dist_dir), str(PUBLIC_DIR))
+
+    _write_local_frontend_service_script(PUBLIC_DIR)
 
     runtime_package = dict(RUNTIME_PACKAGE)
     runtime_package["version"] = version_tag
@@ -840,6 +1068,23 @@ def _prompt_path(label: str, *, default: Path, allow_empty: bool = False) -> str
     if not value:
         return ""
     return str(Path(value).expanduser().resolve())
+
+
+def _resolve_interactive_config_dir(
+    command: str, explicit_config_dir: Optional[Path]
+) -> Optional[Path]:
+    """
+    `setup` / `init` 是最常见的本地安装入口。
+    当用户没有显式传入 `--config-dir` 且当前终端可交互时，先询问一次配置目录，
+    并把程序外默认路径展示出来，避免用户安装后才发现配置写到了别处。
+    """
+    if explicit_config_dir or command not in {"init", "setup"} or not _is_interactive():
+        return explicit_config_dir
+
+    default_config_dir = resolve_config_dir(prefer_external=True)
+    print_step("安装将使用程序目录外的配置目录，直接回车可接受默认值")
+    selected_path = _prompt_path("配置目录", default=default_config_dir)
+    return Path(selected_path) if selected_path else default_config_dir
 
 
 def _validate_superuser_name(username: str) -> Optional[str]:
@@ -1386,6 +1631,23 @@ def _collect_site_auth_config(
     }
 
 
+def _collect_autostart_config() -> dict[str, Any]:
+    print_step("开机自启配置")
+    current_status = _autostart_status()
+    default_enabled = bool(current_status.get("enabled")) or _env_bool(
+        AUTOSTART_ENV_KEY, False
+    )
+    if current_status.get("enabled"):
+        print(
+            f"当前已检测到开机自启：{current_status.get('label') or _startup_platform_name()}"
+        )
+    else:
+        print(f"当前系统将使用：{_startup_platform_name()}")
+
+    enabled = _prompt_yes_no("是否设置开机自启", default=default_enabled)
+    return {"enabled": enabled}
+
+
 def run_setup_wizard(
     force_token: bool,
     runtime_python: Optional[Path] = None,
@@ -1447,6 +1709,7 @@ def run_setup_wizard(
         "mediaserver": _collect_media_server_config(),
         "notification": _collect_notification_config(),
         "site_auth": _collect_site_auth_config(runtime_python=runtime_python),
+        "autostart": _collect_autostart_config(),
     }
 
 
@@ -1737,6 +2000,37 @@ def apply_local_system_config(
         )
 
 
+def _apply_autostart_choice(
+    autostart_payload: Optional[dict[str, Any]],
+    *,
+    config_dir: Path,
+    runtime_python: Optional[Path],
+    venv_dir: Optional[Path],
+) -> None:
+    if not isinstance(autostart_payload, dict):
+        return
+
+    if autostart_payload.get("enabled"):
+        result = enable_autostart(
+            config_dir=config_dir,
+            runtime_python=runtime_python,
+            venv_dir=venv_dir,
+        )
+        print_step(f"已启用开机自启：{result.get('method')}")
+        if result.get("artifact"):
+            print(f"  注册文件：{result['artifact']}")
+        if result.get("note"):
+            print(f"  说明：{result['note']}")
+        return
+
+    result = disable_autostart()
+    removed_paths = result.get("removed_paths") or []
+    if removed_paths:
+        print_step("已取消开机自启注册")
+    else:
+        print_step("当前未配置开机自启，无需取消")
+
+
 def init_local(
     *,
     resources_repo: Optional[Path],
@@ -1748,6 +2042,7 @@ def init_local(
     superuser: Optional[str],
     superuser_password: Optional[str],
     runtime_python: Optional[Path] = None,
+    venv_dir: Optional[Path] = None,
 ) -> None:
     ensure_local_dirs()
 
@@ -1797,6 +2092,17 @@ def init_local(
     elif direct_env_settings:
         sync_superuser_account(runtime_python=runtime_python)
 
+    if wizard_payload:
+        try:
+            _apply_autostart_choice(
+                wizard_payload.get("autostart"),
+                config_dir=CONFIG_DIR,
+                runtime_python=runtime_python,
+                venv_dir=venv_dir,
+            )
+        except Exception as exc:
+            print_step(f"开机自启配置未完成：{exc}")
+
 
 def install_deps(*, python_bin: str, venv_dir: Path, recreate: bool) -> Path:
     ensure_supported_python(python_bin)
@@ -1824,6 +2130,496 @@ def install_deps(*, python_bin: str, venv_dir: Path, recreate: bool) -> Path:
     return venv_python
 
 
+def _startup_platform_name() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return "macOS LaunchAgent"
+    if system == "Linux":
+        return "Linux systemd/XDG"
+    if system == "Windows":
+        return "Windows Startup"
+    return system or "unknown"
+
+
+def _runtime_python_candidates(
+    runtime_python: Optional[Path], venv_dir: Optional[Path]
+) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    raw_candidates = [
+        runtime_python,
+        get_venv_python((venv_dir or (ROOT / "venv")).expanduser().resolve()),
+        Path(sys.executable) if sys.executable else None,
+    ]
+    for candidate in raw_candidates:
+        if not candidate:
+            continue
+        resolved = Path(candidate).expanduser().resolve()
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(resolved)
+    return candidates
+
+
+def _can_run_moviepilot_cli(python_bin: Path) -> bool:
+    if not python_bin.exists():
+        return False
+
+    result = subprocess.run(
+        [str(python_bin), "-m", "app.cli", "--help"],
+        cwd=str(ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _resolve_runtime_python_for_startup(
+    runtime_python: Optional[Path], venv_dir: Optional[Path]
+) -> Path:
+    for candidate in _runtime_python_candidates(runtime_python, venv_dir):
+        if _can_run_moviepilot_cli(candidate):
+            return candidate
+
+    raise RuntimeError(
+        "未找到可用于启动 MoviePilot 的 Python 运行环境，请先执行 moviepilot install deps 或 moviepilot setup"
+    )
+
+
+def _linux_user_systemd_dir() -> Path:
+    return (
+        Path(os.getenv("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+        / "systemd"
+        / "user"
+    )
+
+
+def _linux_xdg_autostart_dir() -> Path:
+    return Path(os.getenv("XDG_CONFIG_HOME") or (Path.home() / ".config")) / "autostart"
+
+
+def _macos_launch_agent_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{MACOS_LAUNCH_AGENT_LABEL}.plist"
+
+
+def _linux_systemd_unit_path() -> Path:
+    return _linux_user_systemd_dir() / LINUX_SYSTEMD_UNIT_NAME
+
+
+def _linux_xdg_autostart_path() -> Path:
+    return _linux_xdg_autostart_dir() / LINUX_XDG_AUTOSTART_FILENAME
+
+
+def _windows_startup_dir() -> Path:
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        return (
+            Path(appdata)
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "Startup"
+        )
+    return (
+        Path.home()
+        / "AppData"
+        / "Roaming"
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup"
+    )
+
+
+def _windows_startup_path() -> Path:
+    return _windows_startup_dir() / WINDOWS_STARTUP_FILENAME
+
+
+def _launcher_paths_for_platform(system_name: Optional[str] = None) -> list[Path]:
+    system_name = system_name or platform.system()
+    if system_name == "Windows":
+        return [AUTOSTART_WINDOWS_LAUNCHER]
+    return [AUTOSTART_UNIX_LAUNCHER]
+
+
+def _cleanup_startup_launchers(system_name: Optional[str] = None) -> None:
+    for path in _launcher_paths_for_platform(system_name):
+        if path.exists():
+            _remove_path(path)
+
+    if AUTOSTART_RUNTIME_DIR.exists() and not any(AUTOSTART_RUNTIME_DIR.iterdir()):
+        AUTOSTART_RUNTIME_DIR.rmdir()
+
+
+def _write_unix_startup_launcher(config_dir: Path, python_bin: Path) -> Path:
+    AUTOSTART_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    launcher_content = textwrap.dedent(
+        f"""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        export CONFIG_DIR={shlex.quote(str(config_dir))}
+        cd {shlex.quote(str(ROOT))}
+        exec {shlex.quote(str(python_bin))} -m app.cli start --timeout {AUTOSTART_TIMEOUT}
+        """
+    )
+    AUTOSTART_UNIX_LAUNCHER.write_text(launcher_content, encoding="utf-8")
+    AUTOSTART_UNIX_LAUNCHER.chmod(0o755)
+    return AUTOSTART_UNIX_LAUNCHER
+
+
+def _write_windows_startup_launcher(config_dir: Path, python_bin: Path) -> Path:
+    AUTOSTART_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    launcher_content = textwrap.dedent(
+        f"""\
+        @echo off
+        setlocal
+        set "CONFIG_DIR={config_dir}"
+        cd /d "{ROOT}"
+        "{python_bin}" -m app.cli start --timeout {AUTOSTART_TIMEOUT}
+        endlocal
+        """
+    )
+    AUTOSTART_WINDOWS_LAUNCHER.write_text(launcher_content, encoding="utf-8")
+    return AUTOSTART_WINDOWS_LAUNCHER
+
+
+def _double_quote(value: Any) -> str:
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _run_optional_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+    )
+
+
+def _last_command_line(result: subprocess.CompletedProcess[str]) -> str:
+    lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    return lines[-1] if lines else "命令未返回更多信息"
+
+
+def _linux_linger_enabled() -> Optional[bool]:
+    loginctl_bin = shutil.which("loginctl")
+    if not loginctl_bin:
+        return None
+
+    result = _run_optional_command(
+        [loginctl_bin, "show-user", getpass.getuser(), "-p", "Linger", "--value"]
+    )
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip().lower()
+    if value in {"yes", "no"}:
+        return value == "yes"
+    return None
+
+
+def _autostart_status() -> dict[str, Any]:
+    system_name = platform.system()
+    if system_name == "Darwin":
+        artifact = _macos_launch_agent_path()
+        return {
+            "enabled": artifact.exists(),
+            "method": "launchagent",
+            "label": "LaunchAgent",
+            "artifact": artifact,
+        }
+    if system_name == "Linux":
+        systemd_unit = _linux_systemd_unit_path()
+        if systemd_unit.exists():
+            return {
+                "enabled": True,
+                "method": "systemd-user",
+                "label": "systemd --user",
+                "artifact": systemd_unit,
+                "linger_enabled": _linux_linger_enabled(),
+            }
+        desktop_file = _linux_xdg_autostart_path()
+        return {
+            "enabled": desktop_file.exists(),
+            "method": "xdg-autostart" if desktop_file.exists() else "none",
+            "label": "XDG autostart" if desktop_file.exists() else "not-configured",
+            "artifact": desktop_file if desktop_file.exists() else None,
+        }
+    if system_name == "Windows":
+        artifact = _windows_startup_path()
+        return {
+            "enabled": artifact.exists(),
+            "method": "startup-folder",
+            "label": "Startup Folder",
+            "artifact": artifact,
+        }
+
+    return {
+        "enabled": False,
+        "method": "unsupported",
+        "label": _startup_platform_name(),
+        "artifact": None,
+    }
+
+
+def _enable_autostart_macos(config_dir: Path, python_bin: Path) -> dict[str, Any]:
+    launcher = _write_unix_startup_launcher(config_dir=config_dir, python_bin=python_bin)
+    agent_path = _macos_launch_agent_path()
+    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    plist_content = textwrap.dedent(
+        f"""\
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+          <dict>
+            <key>Label</key>
+            <string>{MACOS_LAUNCH_AGENT_LABEL}</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/bin/bash</string>
+              <string>{launcher}</string>
+            </array>
+            <key>WorkingDirectory</key>
+            <string>{ROOT}</string>
+            <key>RunAtLoad</key>
+            <true/>
+            <key>StandardOutPath</key>
+            <string>{LOG_DIR / "moviepilot.launchagent.stdout.log"}</string>
+            <key>StandardErrorPath</key>
+            <string>{LOG_DIR / "moviepilot.launchagent.stderr.log"}</string>
+          </dict>
+        </plist>
+        """
+    )
+    agent_path.write_text(plist_content, encoding="utf-8")
+
+    uid = str(os.getuid())
+    _run_optional_command(["launchctl", "bootout", f"gui/{uid}", str(agent_path)])
+    bootstrap_result = _run_optional_command(
+        ["launchctl", "bootstrap", f"gui/{uid}", str(agent_path)]
+    )
+    if bootstrap_result.returncode != 0:
+        note = _last_command_line(bootstrap_result)
+    else:
+        enable_result = _run_optional_command(
+            ["launchctl", "enable", f"gui/{uid}/{MACOS_LAUNCH_AGENT_LABEL}"]
+        )
+        note = (
+            _last_command_line(enable_result)
+            if enable_result.returncode != 0
+            else "已加载到当前登录会话"
+        )
+
+    write_env_value(AUTOSTART_ENV_KEY, "true")
+    return {
+        "method": "LaunchAgent",
+        "artifact": agent_path,
+        "note": note,
+    }
+
+
+def _enable_autostart_linux_systemd(
+    config_dir: Path, python_bin: Path
+) -> Optional[dict[str, Any]]:
+    systemctl_bin = shutil.which("systemctl")
+    if not systemctl_bin:
+        return None
+
+    launcher = _write_unix_startup_launcher(config_dir=config_dir, python_bin=python_bin)
+    unit_path = _linux_systemd_unit_path()
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_content = textwrap.dedent(
+        f"""\
+        [Unit]
+        Description=MoviePilot local autostart
+        Wants=network-online.target
+        After=network-online.target
+
+        [Service]
+        Type=oneshot
+        WorkingDirectory={ROOT}
+        ExecStart=/bin/bash {_double_quote(launcher)}
+
+        [Install]
+        WantedBy=default.target
+        """
+    )
+    unit_path.write_text(unit_content, encoding="utf-8")
+
+    _run_optional_command([systemctl_bin, "--user", "daemon-reload"])
+    enable_result = _run_optional_command(
+        [systemctl_bin, "--user", "enable", LINUX_SYSTEMD_UNIT_NAME]
+    )
+    if enable_result.returncode != 0:
+        _remove_path(unit_path)
+        _run_optional_command([systemctl_bin, "--user", "daemon-reload"])
+        return None
+
+    start_result = _run_optional_command(
+        [systemctl_bin, "--user", "start", LINUX_SYSTEMD_UNIT_NAME]
+    )
+    desktop_path = _linux_xdg_autostart_path()
+    if desktop_path.exists():
+        _remove_path(desktop_path)
+    note = (
+        _last_command_line(start_result)
+        if start_result.returncode != 0
+        else "已注册 systemd --user 并尝试在当前会话执行一次"
+    )
+    linger_enabled = _linux_linger_enabled()
+    if linger_enabled is False:
+        note += "；如需无人登录时随系统启动，请手动执行 sudo loginctl enable-linger $USER"
+
+    write_env_value(AUTOSTART_ENV_KEY, "true")
+    return {
+        "method": "systemd --user",
+        "artifact": unit_path,
+        "note": note,
+    }
+
+
+def _enable_autostart_linux_xdg(config_dir: Path, python_bin: Path) -> dict[str, Any]:
+    launcher = _write_unix_startup_launcher(config_dir=config_dir, python_bin=python_bin)
+    desktop_path = _linux_xdg_autostart_path()
+    desktop_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path = _linux_systemd_unit_path()
+    if unit_path.exists():
+        _remove_path(unit_path)
+        systemctl_bin = shutil.which("systemctl")
+        if systemctl_bin:
+            _run_optional_command([systemctl_bin, "--user", "daemon-reload"])
+    desktop_content = textwrap.dedent(
+        f"""\
+        [Desktop Entry]
+        Type=Application
+        Version=1.0
+        Name=MoviePilot
+        Comment=Start MoviePilot on login
+        Exec=/bin/bash {_double_quote(launcher)}
+        Path={ROOT}
+        Terminal=false
+        X-GNOME-Autostart-enabled=true
+        """
+    )
+    desktop_path.write_text(desktop_content, encoding="utf-8")
+    write_env_value(AUTOSTART_ENV_KEY, "true")
+    return {
+        "method": "XDG autostart",
+        "artifact": desktop_path,
+        "note": "当前环境未启用 systemd --user，已回退为图形会话登录自启动",
+    }
+
+
+def _enable_autostart_windows(config_dir: Path, python_bin: Path) -> dict[str, Any]:
+    launcher = _write_windows_startup_launcher(config_dir=config_dir, python_bin=python_bin)
+    startup_path = _windows_startup_path()
+    startup_path.parent.mkdir(parents=True, exist_ok=True)
+    startup_content = textwrap.dedent(
+        f"""\
+        @echo off
+        call "{launcher}"
+        """
+    )
+    startup_path.write_text(startup_content, encoding="utf-8")
+    write_env_value(AUTOSTART_ENV_KEY, "true")
+    return {
+        "method": "Startup Folder",
+        "artifact": startup_path,
+        "note": "将在当前用户登录 Windows 后自动启动",
+    }
+
+
+def enable_autostart(
+    *, config_dir: Path, runtime_python: Optional[Path], venv_dir: Optional[Path]
+) -> dict[str, Any]:
+    config_dir = config_dir.expanduser().resolve()
+    python_bin = _resolve_runtime_python_for_startup(runtime_python, venv_dir)
+    system_name = platform.system()
+
+    if system_name == "Darwin":
+        return _enable_autostart_macos(config_dir=config_dir, python_bin=python_bin)
+    if system_name == "Linux":
+        return _enable_autostart_linux_systemd(
+            config_dir=config_dir, python_bin=python_bin
+        ) or _enable_autostart_linux_xdg(config_dir=config_dir, python_bin=python_bin)
+    if system_name == "Windows":
+        return _enable_autostart_windows(config_dir=config_dir, python_bin=python_bin)
+
+    raise RuntimeError(f"当前系统暂不支持自动注册开机自启：{platform.system()}")
+
+
+def disable_autostart() -> dict[str, Any]:
+    system_name = platform.system()
+    removed_paths: list[Path] = []
+
+    if system_name == "Darwin":
+        agent_path = _macos_launch_agent_path()
+        uid = str(os.getuid())
+        _run_optional_command(["launchctl", "bootout", f"gui/{uid}", str(agent_path)])
+        if agent_path.exists():
+            _remove_path(agent_path)
+            removed_paths.append(agent_path)
+        _cleanup_startup_launchers(system_name)
+    elif system_name == "Linux":
+        systemctl_bin = shutil.which("systemctl")
+        unit_path = _linux_systemd_unit_path()
+        desktop_path = _linux_xdg_autostart_path()
+        if systemctl_bin:
+            _run_optional_command(
+                [systemctl_bin, "--user", "disable", LINUX_SYSTEMD_UNIT_NAME]
+            )
+            _run_optional_command([systemctl_bin, "--user", "daemon-reload"])
+        for path in (unit_path, desktop_path):
+            if path.exists():
+                _remove_path(path)
+                removed_paths.append(path)
+        _cleanup_startup_launchers(system_name)
+    elif system_name == "Windows":
+        startup_path = _windows_startup_path()
+        for path in (startup_path, AUTOSTART_WINDOWS_LAUNCHER):
+            if path.exists():
+                _remove_path(path)
+                removed_paths.append(path)
+        _cleanup_startup_launchers(system_name)
+    else:
+        raise RuntimeError(f"当前系统暂不支持自动取消开机自启：{platform.system()}")
+
+    write_env_value(AUTOSTART_ENV_KEY, "false")
+    return {"removed_paths": removed_paths}
+
+
+def print_autostart_status() -> None:
+    status = _autostart_status()
+    if not status.get("enabled"):
+        print_step(f"当前未启用开机自启（{_startup_platform_name()}）")
+        return
+
+    print_step(
+        f"当前已启用开机自启：{status.get('label') or _startup_platform_name()}"
+    )
+    artifact = status.get("artifact")
+    if artifact:
+        print(f"  注册文件：{artifact}")
+    linger_enabled = status.get("linger_enabled")
+    if linger_enabled is False:
+        print(
+            "  说明：当前为 systemd --user 模式，通常会在用户登录后启动；如需无人登录即启动，请手动启用 linger。"
+        )
+
+
 def _read_runtime_file(path: Path) -> Optional[dict[str, Any]]:
     if not path.exists():
         return None
@@ -1843,6 +2639,22 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
+def _read_process_start_time(pid: int) -> Optional[float]:
+    try:
+        output = capture(["ps", "-p", str(pid), "-o", "lstart="])
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    started = output.strip()
+    if not started:
+        return None
+
+    try:
+        return datetime.strptime(started, "%a %b %d %H:%M:%S %Y").timestamp()
+    except ValueError:
+        return None
+
+
 def _services_running() -> list[str]:
     running: list[str] = []
     runtime_files = {
@@ -1852,8 +2664,27 @@ def _services_running() -> list[str]:
     for name, runtime_file in runtime_files.items():
         payload = _read_runtime_file(runtime_file)
         pid = payload.get("pid") if isinstance(payload, dict) else None
-        if pid and _pid_exists(int(pid)):
-            running.append(name)
+        if not pid:
+            continue
+
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            continue
+
+        if not _pid_exists(pid_int):
+            continue
+
+        runtime_start_time = payload.get("create_time") if isinstance(payload, dict) else None
+        process_start_time = _read_process_start_time(pid_int)
+        if runtime_start_time is not None and process_start_time is not None:
+            try:
+                if abs(process_start_time - float(runtime_start_time)) > 3:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        running.append(name)
     return running
 
 
@@ -1864,6 +2695,217 @@ def ensure_services_stopped() -> None:
             "检测到本地服务仍在运行（%s），请先执行 `moviepilot stop` 后再更新。"
             % ", ".join(running)
         )
+
+
+def _stop_managed_services(venv_dir: Path) -> None:
+    venv_dir = venv_dir.expanduser().resolve()
+    venv_python = get_venv_python(venv_dir)
+    if venv_python.exists():
+        print_step("停止本地前后端服务")
+        run(
+            [str(venv_python), "-m", "app.cli", "stop", "--timeout", "30", "--force"],
+            cwd=ROOT,
+        )
+        return
+
+    running = _services_running()
+    if running:
+        raise RuntimeError(
+            "检测到本地服务仍在运行（%s），但当前未找到虚拟环境 %s，无法安全停止。"
+            " 请先执行 `moviepilot stop`，或在卸载时通过 `--venv PATH` 指定正确的虚拟环境目录。"
+            % (", ".join(running), venv_dir)
+        )
+
+
+def _collect_cli_link_candidates(
+    *, command_path: Optional[str] = None, launch_path: Optional[str] = None
+) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    raw_candidates = [
+        launch_path,
+        command_path,
+        os.getenv("MOVIEPILOT_LAUNCH_PATH"),
+        os.getenv("MOVIEPILOT_COMMAND_PATH"),
+        shutil.which("moviepilot"),
+    ]
+
+    for raw_value in raw_candidates:
+        if not raw_value:
+            continue
+        candidate = Path(raw_value).expanduser()
+        if not candidate.is_absolute():
+            candidate = (ROOT / candidate).resolve()
+        try:
+            key = str(candidate.resolve())
+        except OSError:
+            key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _remove_cli_symlinks(
+    *, command_path: Optional[str] = None, launch_path: Optional[str] = None
+) -> list[Path]:
+    removed: list[Path] = []
+    script_path = (ROOT / "moviepilot").resolve()
+
+    for candidate in _collect_cli_link_candidates(
+        command_path=command_path, launch_path=launch_path
+    ):
+        if not candidate.is_symlink():
+            continue
+        try:
+            if candidate.resolve() != script_path:
+                continue
+        except OSError:
+            continue
+        candidate.unlink()
+        removed.append(candidate)
+    return removed
+
+
+def _remove_runtime_state_files() -> list[Path]:
+    removed: list[Path] = []
+    for path in (
+        TEMP_DIR / "moviepilot.runtime.json",
+        TEMP_DIR / "moviepilot.frontend.runtime.json",
+    ):
+        if not path.exists():
+            continue
+        _remove_path(path)
+        removed.append(path)
+    return removed
+
+
+def _remove_installed_resource_files() -> list[Path]:
+    removed: list[Path] = []
+    seen: set[Path] = set()
+    for pattern in RESOURCE_FILE_PATTERNS:
+        for path in sorted(HELPER_DIR.glob(pattern)):
+            if path in seen or not path.exists() or path.is_dir():
+                continue
+            _remove_path(path)
+            removed.append(path)
+            seen.add(path)
+    return removed
+
+
+def _remove_config_data(config_dir: Path) -> list[Path]:
+    config_dir = config_dir.expanduser().resolve()
+    removed: list[Path] = []
+
+    if config_dir.exists():
+        _remove_path(config_dir)
+        removed.append(config_dir)
+    return removed
+
+
+def uninstall_local(
+    *,
+    venv_dir: Path,
+    config_dir: Path,
+    command_path: Optional[str] = None,
+    launch_path: Optional[str] = None,
+) -> dict[str, Any]:
+    if not _is_interactive():
+        raise RuntimeError("卸载命令需要在交互式终端中运行，以完成两次确认。")
+
+    venv_dir = venv_dir.expanduser().resolve()
+    config_dir = config_dir.expanduser().resolve()
+    cli_links = _collect_cli_link_candidates(
+        command_path=command_path, launch_path=launch_path
+    )
+    script_path = (ROOT / "moviepilot").resolve()
+    linked_cli_paths = [
+        path
+        for path in cli_links
+        if path.is_symlink() and path.exists() and path.resolve() == script_path
+    ]
+    autostart_status = _autostart_status()
+
+    delete_config = _prompt_yes_no(
+        f"是否同时删除配置目录 {config_dir}", default=False
+    )
+
+    print_step("卸载将执行以下操作")
+    print(f"  - 保留源码目录：{ROOT}")
+    print(f"  - 删除虚拟环境：{venv_dir}")
+    print(f"  - 删除前端运行时目录：{PUBLIC_DIR}")
+    print(f"  - 删除本地 Node 运行时目录：{RUNTIME_DIR}")
+    print(f"  - 删除资源文件：{HELPER_DIR}/sites*、{HELPER_DIR}/user.sites*.bin")
+    if linked_cli_paths:
+        print("  - 删除全局 CLI 软链接：")
+        for path in linked_cli_paths:
+            print(f"    {path}")
+    else:
+        print("  - 未检测到指向当前仓库的全局 CLI 软链接")
+    if autostart_status.get("enabled"):
+        print(
+            f"  - 取消开机自启：{autostart_status.get('label') or _startup_platform_name()}"
+        )
+    else:
+        print("  - 当前未配置开机自启")
+
+    if delete_config:
+        print(f"  - 删除配置目录：{config_dir}")
+        if config_dir == LEGACY_CONFIG_DIR.resolve():
+            print("    包括 legacy config 目录中的 category.yaml 等配置文件")
+    else:
+        print(f"  - 保留配置目录：{config_dir}")
+
+    if not _prompt_yes_no("第一次确认：是否继续卸载 MoviePilot", default=False):
+        print_step("已取消卸载")
+        return {"cancelled": True}
+
+    confirm_text = _prompt_text(
+        f"第二次确认：请输入 {UNINSTALL_CONFIRM_TEXT} 以继续",
+        allow_empty=False,
+    )
+    if confirm_text != UNINSTALL_CONFIRM_TEXT:
+        print_step("确认文本不匹配，已取消卸载")
+        return {"cancelled": True}
+
+    _stop_managed_services(venv_dir=venv_dir)
+    if autostart_status.get("enabled"):
+        disable_autostart()
+
+    removed_paths: list[Path] = []
+    removed_paths.extend(
+        _remove_cli_symlinks(command_path=command_path, launch_path=launch_path)
+    )
+    removed_paths.extend(_remove_runtime_state_files())
+    removed_paths.extend(_remove_installed_resource_files())
+    for path in (venv_dir, RUNTIME_DIR, PUBLIC_DIR):
+        if not path.exists():
+            continue
+        _remove_path(path)
+        removed_paths.append(path)
+
+    removed_config_paths: list[Path] = []
+    if delete_config:
+        removed_config_paths = _remove_config_data(config_dir)
+        removed_paths.extend(removed_config_paths)
+        if INSTALL_ENV_FILE.exists():
+            _remove_path(INSTALL_ENV_FILE)
+            removed_paths.append(INSTALL_ENV_FILE)
+
+    print_step("卸载完成")
+    if delete_config:
+        print_step(f"已删除配置目录：{config_dir}")
+    else:
+        print_step(f"已保留配置目录：{config_dir}")
+    print_step(f"源码目录仍保留在：{ROOT}")
+
+    return {
+        "cancelled": False,
+        "config_deleted": delete_config,
+        "removed_paths": [str(path) for path in removed_paths],
+        "removed_config_paths": [str(path) for path in removed_config_paths],
+    }
 
 
 def _git_output(*args: str) -> str:
@@ -1926,6 +2968,44 @@ def update_backend(
     )
     print_step(f"后端更新完成：{resolved_ref}")
     return venv_python
+
+
+def handle_startup_command(
+    *,
+    action: str,
+    config_dir: Path,
+    runtime_python: Optional[Path],
+    venv_dir: Optional[Path],
+) -> None:
+    if action == "status":
+        print_autostart_status()
+        return
+
+    if action == "enable":
+        result = enable_autostart(
+            config_dir=config_dir,
+            runtime_python=runtime_python,
+            venv_dir=venv_dir,
+        )
+        print_step(f"已启用开机自启：{result.get('method')}")
+        if result.get("artifact"):
+            print(f"注册文件：{result['artifact']}")
+        if result.get("note"):
+            print(f"说明：{result['note']}")
+        return
+
+    if action == "disable":
+        result = disable_autostart()
+        removed_paths = result.get("removed_paths") or []
+        if removed_paths:
+            print_step("已取消开机自启注册")
+            for path in removed_paths:
+                print(f"已移除：{path}")
+        else:
+            print_step("当前未配置开机自启，无需取消")
+        return
+
+    raise RuntimeError(f"未知的 startup 动作：{action}")
 
 
 def run_agent_request(
@@ -2068,6 +3148,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--config-dir", help="配置目录，默认使用程序目录外的系统配置目录"
     )
 
+    uninstall_parser = subparsers.add_parser(
+        "uninstall", help="卸载本地安装产物，并可选删除配置目录"
+    )
+    uninstall_parser.add_argument(
+        "--venv", default=str(ROOT / "venv"), help="虚拟环境目录"
+    )
+    uninstall_parser.add_argument(
+        "--config-dir", help="配置目录，默认使用当前安装配置"
+    )
+
     agent_parser = subparsers.add_parser(
         "agent", help="直接向 MoviePilot 智能体发送一次请求"
     )
@@ -2114,6 +3204,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--config-dir", help="配置目录，默认使用程序目录外的系统配置目录"
     )
 
+    startup_parser = subparsers.add_parser(
+        "startup", help="注册、取消或查看本地开机自启"
+    )
+    startup_parser.add_argument(
+        "action", choices=["enable", "disable", "status"], help="开机自启动作"
+    )
+    startup_parser.add_argument(
+        "--venv", default=str(ROOT / "venv"), help="虚拟环境目录"
+    )
+    startup_parser.add_argument(
+        "--config-dir", help="配置目录，默认使用当前安装配置"
+    )
+
     apply_config_parser = subparsers.add_parser("apply-config", help=argparse.SUPPRESS)
     apply_config_parser.add_argument(
         "--config-json-file", required=True, help=argparse.SUPPRESS
@@ -2140,10 +3243,22 @@ def main() -> int:
     explicit_config_dir = (
         Path(args.config_dir) if getattr(args, "config_dir", None) else None
     )
+    explicit_config_dir = _resolve_interactive_config_dir(
+        args.command, explicit_config_dir
+    )
+    persist_config_commands = {
+        "install-deps",
+        "install-frontend",
+        "install-resources",
+        "init",
+        "setup",
+        "agent",
+        "update",
+    }
     config_dir = configure_config_dir(
         explicit=explicit_config_dir,
-        persist=True,
-        prefer_external=True,
+        persist=args.command in persist_config_commands,
+        prefer_external=args.command in persist_config_commands,
     )
 
     try:
@@ -2186,6 +3301,7 @@ def main() -> int:
                 superuser=args.superuser,
                 superuser_password=args.superuser_password,
                 runtime_python=None,
+                venv_dir=ROOT / "venv",
             )
             print_step("初始化完成")
             print_step(f"当前配置目录：{config_dir}")
@@ -2221,9 +3337,19 @@ def main() -> int:
                 superuser=args.superuser,
                 superuser_password=args.superuser_password,
                 runtime_python=venv_python,
+                venv_dir=Path(args.venv),
             )
             print_step(f"本地环境已完成安装与初始化：{venv_python}")
             print_step(f"当前配置目录：{config_dir}")
+            return 0
+
+        if args.command == "uninstall":
+            uninstall_local(
+                venv_dir=Path(args.venv),
+                config_dir=config_dir,
+                command_path=os.getenv("MOVIEPILOT_COMMAND_PATH"),
+                launch_path=os.getenv("MOVIEPILOT_LAUNCH_PATH"),
+            )
             return 0
 
         if args.command == "agent":
@@ -2257,6 +3383,20 @@ def main() -> int:
                 install_resources(resources_repo=None, resource_dir=None)
                 print_step("资源文件已同步到最新")
             print_step(f"更新完成，当前配置目录：{config_dir}")
+            return 0
+
+        if args.command == "startup":
+            runtime_python = None
+            if args.action == "enable":
+                runtime_python = _resolve_runtime_python_for_startup(
+                    None, Path(args.venv)
+                )
+            handle_startup_command(
+                action=args.action,
+                config_dir=config_dir,
+                runtime_python=runtime_python,
+                venv_dir=Path(args.venv),
+            )
             return 0
 
         if args.command == "apply-config":

@@ -41,6 +41,8 @@ curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/scripts/bootst
 - macOS：`~/Library/Application Support/MoviePilot`
 - Linux：`${XDG_CONFIG_HOME:-~/.config}/moviepilot`
 
+如果在交互式终端中执行一键安装脚本，或直接执行 `moviepilot setup` / `moviepilot init` 且未传入 `--config-dir`，程序会先询问配置目录，并把上面的默认路径作为默认值展示出来。
+
 可以在安装或初始化时手动指定：
 
 ```shell
@@ -62,6 +64,7 @@ moviepilot config path
 - 前端本地 Node 运行时：`.runtime/node/`
 - 后端日志：`<Config Dir>/logs/moviepilot.log`
 - 后端启动日志：`<Config Dir>/logs/moviepilot.stdout.log`
+  该文件同样受 `LOG_MAX_FILE_SIZE` 与 `LOG_BACKUP_COUNT` 控制
 - 前端启动日志：`<Config Dir>/logs/moviepilot.frontend.stdout.log`
 
 ## 帮助与发现
@@ -80,6 +83,7 @@ moviepilot commands
 moviepilot help install
 moviepilot help init
 moviepilot help setup
+moviepilot help uninstall
 moviepilot help update
 moviepilot help agent
 moviepilot help config
@@ -111,9 +115,13 @@ moviepilot install frontend
 moviepilot install resources
 moviepilot init
 moviepilot setup
+moviepilot uninstall
 moviepilot update backend
 moviepilot update frontend
 moviepilot update all
+moviepilot startup enable
+moviepilot startup disable
+moviepilot startup status
 moviepilot agent
 moviepilot start
 moviepilot stop
@@ -228,6 +236,8 @@ moviepilot setup --config-dir /path/to/moviepilot-config
   可按需启用，并配置 `LLM_PROVIDER`、`LLM_MODEL`、`LLM_API_KEY`、`LLM_BASE_URL`
 - 用户站点认证
   可按需选择认证站点，并按站点要求填写用户名、UID、Passkey 等参数
+- 开机自启
+  可按需启用，MoviePilot 会根据当前操作系统注册登录自启动
 - 下载器
 - 媒体服务器
 - 消息通知渠道
@@ -243,6 +253,45 @@ curl -fsSL https://raw.githubusercontent.com/jxxghp/MoviePilot/v2/scripts/bootst
 
 - `--superuser-password` 更适合自动化场景，命令可能会出现在 shell 历史中
 - 交互式 `--wizard` 会在初始化过程中提示输入超级管理员用户名和密码
+
+## 开机自启命令
+
+管理当前本地安装的开机自启：
+
+```shell
+moviepilot startup status
+moviepilot startup enable
+moviepilot startup disable
+moviepilot startup enable --venv /path/to/venv
+moviepilot startup enable --config-dir /path/to/moviepilot-config
+```
+
+说明：
+
+- macOS 使用 `LaunchAgent`
+- Linux 优先使用 `systemd --user`，当前环境不可用时自动回退到 `XDG autostart`
+- Windows 使用当前用户的 Startup 启动目录
+- 注册的启动项会调用本地 CLI 的统一启动入口，因此会同时拉起后端与前端
+
+## 卸载命令
+
+卸载本地安装产物：
+
+```shell
+moviepilot uninstall
+moviepilot uninstall --venv /path/to/venv
+moviepilot uninstall --config-dir /path/to/moviepilot-config
+```
+
+说明：
+
+- 卸载时会先停止当前 CLI 管理的前后端服务
+- 会删除本地虚拟环境、前端运行时、本地 Node 运行时、全局 `moviepilot` 软链接，以及同步到 `app/helper` 的资源文件
+- 如果之前注册过开机自启，卸载时也会一并取消
+- 会询问是否同时删除配置目录，默认不删除
+- 如果当前使用的是仓库内 legacy `config/` 目录，确认删除后其中的 `category.yaml` 等配置文件也会一起删除
+- 整个卸载流程包含两次确认
+- 源码目录会保留，如需彻底移除仓库请在确认后手动删除项目目录
 
 ## 更新命令
 
@@ -315,10 +364,12 @@ moviepilot version
 说明：
 
 - `start` 会先启动后端，再启动前端
+- 如果开启了 `MOVIEPILOT_AUTO_UPDATE=release|true|dev`，`start/restart` 会在启动前尽力执行一次本地自动更新；更新失败只告警，不阻断当前启动
 - 通过系统内置的重启入口触发重启时，本地 CLI 安装模式也会复用同一套前后端进程管理完成重启
 - 前端默认监听 `NGINX_PORT`，默认值 `3000`
 - 后端默认监听 `PORT`，默认值 `3001`
 - 前端通过 `service.js` 代理 `/api` 与 `/cookiecloud` 到后端
+- 本地前端代理在启动时会先确认后端可用；如果后端长时间不可用，前端也会自动退出，避免只剩半套服务
 
 日志：
 

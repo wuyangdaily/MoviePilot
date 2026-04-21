@@ -14,7 +14,9 @@ Bootstrap Commands:
   moviepilot install resources [--resources-repo PATH] [--resource-dir PATH] [--config-dir PATH]
   moviepilot init [--skip-resources] [--force-token] [--wizard] [--superuser NAME] [--superuser-password PASSWORD] [--config-dir PATH]
   moviepilot setup [--python PYTHON] [--venv PATH] [--recreate] [--frontend-version latest] [--node-version 20.12.1] [--wizard] [--superuser NAME] [--superuser-password PASSWORD] [--config-dir PATH]
+  moviepilot uninstall [--venv PATH] [--config-dir PATH]
   moviepilot update {backend|frontend|all} [OPTIONS]
+  moviepilot startup {enable|disable|status} [--venv PATH] [--config-dir PATH]
   moviepilot agent [OPTIONS] MESSAGE...
 
 Runtime Commands:
@@ -27,7 +29,9 @@ Discovery Commands:
   moviepilot help
   moviepilot help config
   moviepilot help install
+  moviepilot help uninstall
   moviepilot help update
+  moviepilot help startup
   moviepilot commands
 
 Examples:
@@ -35,7 +39,9 @@ Examples:
   moviepilot install frontend
   moviepilot install resources
   moviepilot setup --wizard
+  moviepilot uninstall
   moviepilot update all
+  moviepilot startup enable
   moviepilot agent 帮我分析最近一次搜索失败
   moviepilot help config
   moviepilot config keys
@@ -52,9 +58,13 @@ Bootstrap Commands
   install resources
   init
   setup
+  uninstall
   update backend
   update frontend
   update all
+  startup enable
+  startup disable
+  startup status
   agent
 
 Runtime Commands
@@ -145,6 +155,22 @@ Options:
 EOF
 }
 
+show_uninstall_help() {
+  cat <<'EOF'
+Usage: moviepilot uninstall [OPTIONS]
+
+Options:
+  --venv PATH        虚拟环境目录，默认 ./venv
+  --config-dir PATH  指定配置目录，默认使用当前安装配置
+  -h, --help         显示帮助
+
+说明:
+  - 默认保留配置目录，过程中会询问是否删除
+  - 卸载时会进行两次确认
+  - 源码目录不会被删除
+EOF
+}
+
 show_update_help() {
   cat <<'EOF'
 Usage:
@@ -162,6 +188,25 @@ Options:
   --skip-resources          更新 all 时跳过资源同步
   --config-dir PATH         指定配置目录
   -h, --help                显示帮助
+EOF
+}
+
+show_startup_help() {
+  cat <<'EOF'
+Usage:
+  moviepilot startup enable [OPTIONS]
+  moviepilot startup disable [OPTIONS]
+  moviepilot startup status [OPTIONS]
+
+Options:
+  --venv PATH        虚拟环境目录，默认 ./venv
+  --config-dir PATH  指定配置目录，默认使用当前安装配置
+  -h, --help         显示帮助
+
+说明:
+  - macOS 使用 LaunchAgent
+  - Linux 优先使用 systemd --user，不可用时回退到 XDG autostart
+  - Windows 使用当前用户的 Startup 启动目录
 EOF
 }
 
@@ -296,12 +341,20 @@ show_command_help() {
       show_setup_help
       exit 0
       ;;
+    uninstall)
+      show_uninstall_help
+      exit 0
+      ;;
     agent)
       show_agent_help
       exit 0
       ;;
     update)
       show_update_help
+      exit 0
+      ;;
+    startup)
+      show_startup_help
       exit 0
       ;;
     commands)
@@ -397,10 +450,21 @@ case "${1:-}" in
     require_bootstrap_python
     exec "$BOOTSTRAP_PYTHON" "$SETUP_SCRIPT" setup "$@"
     ;;
+  uninstall)
+    shift
+    require_bootstrap_python
+    COMMAND_PATH="$(command -v moviepilot 2>/dev/null || true)"
+    MOVIEPILOT_LAUNCH_PATH="$0" MOVIEPILOT_COMMAND_PATH="$COMMAND_PATH" exec "$BOOTSTRAP_PYTHON" "$SETUP_SCRIPT" uninstall "$@"
+    ;;
   update)
     shift
     require_bootstrap_python
     exec "$BOOTSTRAP_PYTHON" "$SETUP_SCRIPT" update "$@"
+    ;;
+  startup)
+    shift
+    require_bootstrap_python
+    exec "$BOOTSTRAP_PYTHON" "$SETUP_SCRIPT" startup "$@"
     ;;
   agent)
     shift
