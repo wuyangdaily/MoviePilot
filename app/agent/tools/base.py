@@ -82,8 +82,9 @@ class MoviePilotTool(BaseTool, metaclass=ABCMeta):
                         merged_message = "\n\n".join(messages)
                         await self.send_tool_message(merged_message)
             else:
-                # 非VERBOSE，重置缓冲区从头更新，保持消息编辑能力
-                self._stream_handler.reset()
+                # 非VERBOSE：工具边界至少补一个换行，避免工具前后的文本直接连在一起
+                if self._stream_handler.last_buffer_char not in ("", "\n"):
+                    self._stream_handler.emit("\n")
         else:
             # 未启用流式传输，不发送任何工具消息内容
             pass
