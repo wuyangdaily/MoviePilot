@@ -5,7 +5,7 @@ from typing import List, Optional, Type
 from pydantic import BaseModel, Field, model_validator
 
 from app.agent.tools.base import MoviePilotTool, ToolChain
-from app.chain.interaction import (
+from app.helper.interaction import (
     AgentInteractionOption,
     agent_interaction_manager,
 )
@@ -64,6 +64,7 @@ class AskUserChoiceInput(BaseModel):
 
 class AskUserChoiceTool(MoviePilotTool):
     name: str = "ask_user_choice"
+    sends_message: bool = True
     description: str = (
         "Ask the user to choose from button options on channels that support interactive buttons. "
         "After the user clicks a button, the selected value will come back as the user's next message."
