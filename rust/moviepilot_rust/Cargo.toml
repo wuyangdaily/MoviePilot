@@ -1,0 +1,11 @@
+[package]
+name = "moviepilot-rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "moviepilot_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["abi3-py311", "extension-module"] }

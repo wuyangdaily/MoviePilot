@@ -58,22 +58,36 @@ def _finish_processing_status(status: Optional[dict], user_id: Optional[str] = N
     """结束入站消息的渠道处理状态。"""
     if not status:
         return
-    try:
-        channel = MessageChannel(status.get("channel"))
-    except Exception:
-        return
-    try:
-        AgentChain().run_module(
-            "mark_message_processing_finished",
-            channel=channel,
-            source=status.get("source"),
-            userid=status.get("userid") or user_id,
-            message_id=status.get("message_id"),
-            chat_id=status.get("chat_id"),
-            status=status,
-        )
-    except Exception as err:
-        logger.debug(f"结束Agent消息处理状态失败: {err}")
+    AgentChain().finish_message_processing_status(
+        status=status,
+        userid=user_id,
+    )
+
+
+async def _async_start_processing_status(task: "_MessageTask") -> Optional[dict]:
+    """
+    在 Agent worker 中启动渠道处理状态。
+    渠道启动可能触发外部 API，同步实现需切到线程池避免阻塞事件循环。
+    """
+    if not task.channel:
+        return None
+
+    def _start() -> Optional[dict]:
+        """在线程池中通过统一 Chain 接口启动处理状态。"""
+        try:
+            return AgentChain().start_message_processing_status(
+                channel=MessageChannel(task.channel),
+                source=task.source,
+                userid=task.user_id,
+                message_id=task.original_message_id,
+                chat_id=task.original_chat_id,
+                text=task.message,
+            )
+        except Exception as err:
+            logger.debug(f"启动Agent消息处理状态失败: {err}")
+            return None
+
+    return await run_in_threadpool(_start)
 
 
 async def _async_finish_processing_status(
@@ -1023,7 +1037,6 @@ class AgentManager:
             username: str = None,
             original_message_id: Optional[str] = None,
             original_chat_id: Optional[str] = None,
-            processing_status: Optional[dict] = None,
             reply_mode: ReplyMode = ReplyMode.DISPATCH,
     ) -> str:
         """
@@ -1041,7 +1054,6 @@ class AgentManager:
             username=username,
             original_message_id=original_message_id,
             original_chat_id=original_chat_id,
-            processing_status=processing_status,
             reply_mode=reply_mode,
         )
 
@@ -1096,13 +1108,12 @@ class AgentManager:
                     break
 
                 try:
+                    await self._start_task_processing_status(task)
                     await self._process_message_internal(task)
                 except Exception as e:
                     logger.error(f"处理会话 {session_id} 的消息失败: {e}")
                 finally:
-                    await _async_finish_processing_status(
-                        task.processing_status, task.user_id
-                    )
+                    await self._finish_task_processing_status(task)
                     queue.task_done()
 
         except asyncio.CancelledError:
@@ -1116,6 +1127,23 @@ class AgentManager:
                     and self._session_queues[session_id].empty()
             ):
                 self._session_queues.pop(session_id, None)
+
+    @staticmethod
+    async def _start_task_processing_status(task: _MessageTask) -> None:
+        """
+        在 Agent worker 真正开始处理消息时启动渠道处理状态。
+        """
+        if task.processing_status:
+            return
+        task.processing_status = await _async_start_processing_status(task)
+
+    @staticmethod
+    async def _finish_task_processing_status(task: _MessageTask) -> None:
+        """
+        在 Agent worker 完成或异常后结束本条消息的渠道处理状态。
+        """
+        await _async_finish_processing_status(task.processing_status, task.user_id)
+        task.processing_status = None
 
     async def _process_message_internal(self, task: _MessageTask):
         """

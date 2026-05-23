@@ -102,11 +102,11 @@ class MetaVideo(MetaBase):
         title = re.sub(r'[0-9.]+\s*[MGT]i?B(?![A-Z]+)', "", title, flags=re.IGNORECASE)
         # 把年月日去掉
         title = re.sub(r'\d{4}[\s._-]\d{1,2}[\s._-]\d{1,2}', "", title)
+        media_exts = settings.RMT_MEDIAEXT + settings.RMT_SUBEXT + settings.RMT_AUDIOEXT
         # 拆分tokens
         tokens = Tokens(title)
         # 实例化StreamingPlatforms对象
         streaming_platforms = StreamingPlatforms()
-        media_exts = settings.RMT_MEDIAEXT + settings.RMT_SUBEXT + settings.RMT_AUDIOEXT
         # 解析名称、年份、季、集、资源类型、分辨率等
         token = tokens.get_next()
         while token:

@@ -607,11 +607,18 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
     ) -> Optional[dict]:
         """
         标记 Telegram 消息正在处理。
-        入站侧已经启动 typing 任务，这里只返回可用于统一收口的上下文。
+        Telegram typing 需要周期性续发，因此在模块接口中启动保活任务。
         """
         if channel != self._channel:
             return None
-        if not text:
+        client_config = self.get_config(source)
+        if not client_config:
+            return None
+        client: Telegram = self.get_instance(client_config.name)
+        if not client:
+            return None
+        started = client.start_typing(chat_id=chat_id, userid=userid)
+        if not started:
             return None
         return {
             "channel": channel.value,
