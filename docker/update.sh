@@ -24,9 +24,19 @@ function WARN() {
 VENV_PATH="${VENV_PATH:-/opt/venv}"
 export PATH="${VENV_PATH}/bin:$PATH"
 
+# 配置 Rust 工具链目录，避免 Docker 中 HOME 与 root 真实主目录不一致时 rustup 无法推断路径。
+function configure_rust_build_env() {
+    local home_dir="${HOME:-/root}"
+    export CARGO_HOME="${CARGO_HOME:-${home_dir}/.cargo}"
+    export RUSTUP_HOME="${RUSTUP_HOME:-${home_dir}/.rustup}"
+    if [[ ":${PATH}:" != *":${CARGO_HOME}/bin:"* ]]; then
+        export PATH="${CARGO_HOME}/bin:$PATH"
+    fi
+}
+
 # 按需准备 Rust 构建环境，避免把工具链常驻打进 Docker runtime 镜像。
 function ensure_rust_build_env() {
-    export PATH="/root/.cargo/bin:$PATH"
+    configure_rust_build_env
     if command -v cargo > /dev/null 2>&1; then
         return 0
     fi
@@ -47,7 +57,7 @@ function ensure_rust_build_env() {
         ERROR "安装 Rust 工具链失败"
         return 1
     fi
-    export PATH="/root/.cargo/bin:$PATH"
+    configure_rust_build_env
     command -v cargo > /dev/null 2>&1
 }
 
@@ -63,7 +73,8 @@ function install_rust_accel() {
         return 1
     fi
     INFO "→ 正在更新 Rust 加速扩展..."
-    if ! "${VENV_PATH}/bin/python" -m maturin develop --release --manifest-path "${manifest}"; then
+    # maturin develop 需要显式的虚拟环境标记，容器内直接调用 venv Python 时不会自动识别。
+    if ! VIRTUAL_ENV="${VENV_PATH}" "${VENV_PATH}/bin/python" -m maturin develop --release --manifest-path "${manifest}"; then
         ERROR "Rust 加速扩展更新失败"
         return 1
     fi

@@ -5,7 +5,7 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import lark_oapi as lark
@@ -106,6 +106,19 @@ class Feishu:
 
         self._api_client = self._build_api_client()
         self._start_ws_client()
+
+    def _should_reject_admin_command(
+            self, *user_ids: Optional[Union[str, int]]
+    ) -> bool:
+        """判断飞书命令或命令型按钮回调是否应因非管理员身份被拒绝。"""
+        if not self._admins:
+            return False
+        candidates = [
+            str(user_id).strip()
+            for user_id in user_ids
+            if user_id is not None and str(user_id).strip()
+        ]
+        return not any(candidate in self._admins for candidate in candidates)
 
     def _build_api_client(self) -> lark.Client:
         """构建飞书 OpenAPI client，用于发送和编辑消息。"""
@@ -494,6 +507,16 @@ class Feishu:
             callback_data = message.get("callback_data")
             if not callback_data:
                 return None
+            if str(callback_data).strip().startswith("/") and self._should_reject_admin_command(
+                    open_id, user_id
+            ):
+                self.send_text(
+                    "只有管理员才有权限执行此命令",
+                    userid=str(userid),
+                    chat_id=message.get("chat_id"),
+                    receive_id_type="open_id" if open_id else "user_id",
+                )
+                return None
             return CommingMessage(
                 channel=MessageChannel.Feishu,
                 source=self._name,
@@ -522,7 +545,7 @@ class Feishu:
         if not text and not images and not audio_refs and not files:
             return None
 
-        if text.startswith("/") and self._admins and str(userid) not in self._admins:
+        if text.startswith("/") and self._should_reject_admin_command(open_id, user_id):
             self.send_text(
                 "只有管理员才有权限执行此命令",
                 userid=str(userid),
@@ -969,7 +992,7 @@ class Feishu:
         if response.success():
             data = getattr(response, "data", None)
             return getattr(data, "card_id", None)
-        logger.error(
+        logger.warn(
             "飞书流式卡片创建失败：code=%s, msg=%s, log_id=%s",
             response.code,
             response.msg,
@@ -1086,9 +1109,9 @@ class Feishu:
             .build()
         )
         if response.success():
-            logger.info("飞书流式卡片更新成功：card_id=%s, sequence=%s, content_len=%s", card_id, sequence, len(content))
+            logger.debug("飞书流式卡片更新成功：card_id=%s, sequence=%s, content_len=%s", card_id, sequence, len(content))
             return True
-        logger.error(
+        logger.warn(
             "飞书流式卡片内容更新失败：card_id=%s, element_id=%s, sequence=%s, code=%s, msg=%s, log_id=%s",
             card_id,
             element_id,
@@ -1116,7 +1139,7 @@ class Feishu:
         )
         if response.success():
             return True
-        logger.error(
+        logger.warn(
             "飞书关闭流式卡片失败：card_id=%s, sequence=%s, code=%s, msg=%s, log_id=%s",
             card_id,
             sequence,
@@ -1533,7 +1556,7 @@ class Feishu:
                     original_message_id=original_message_id,
                 )
             except Exception as err:
-                logger.error(f"飞书流式卡片发送失败：{err}")
+                logger.warn(f"飞书流式卡片发送失败：{err}")
                 return {"success": False}
             if not result:
                 return {"success": False}
@@ -1599,7 +1622,7 @@ class Feishu:
             card_id = str(stream_meta.get("card_id") or "").strip()
             element_id = str(stream_meta.get("element_id") or self.STREAM_CARD_BODY_ELEMENT_ID).strip()
             sequence = int(stream_meta.get("sequence") or 0) + 1
-            logger.info("准备更新飞书流式卡片：card_id=%s, sequence=%s (before incr: %s)", card_id, sequence, stream_meta.get("sequence"))
+            logger.debug("准备更新飞书流式卡片：card_id=%s, sequence=%s (before incr: %s)", card_id, sequence, stream_meta.get("sequence"))
             # 无论远端是否响应成功都自增 sequence，防止某次超时导致后续 sequence 一直因为没有递增而被拒绝
             stream_meta["sequence"] = sequence
             

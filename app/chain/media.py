@@ -84,13 +84,12 @@ class ScrapingOption:
 class ScrapingConfig:
     """媒体刮削配置"""
 
-    _policies: dict[tuple[str], ScrapingOption] = {}
-
     def __init__(self, config_dict: dict[str, str] = None):
         """
         初始化配置对象
         :param config_dict: 用户配置字典（扁平化格式），为 None 时使用默认配置
         """
+        self._policies: dict[tuple[str, str], ScrapingOption] = {}
         # 合并用户配置和默认配置
         if config_dict is None:
             config_dict = {}
@@ -572,20 +571,20 @@ class MediaChain(ChainBase, ConfigReloadMixin, metaclass=Singleton):
         plugin_available = eventmanager.check(ChainEventType.NameRecognize)
         if settings.RECOGNIZE_PLUGIN_FIRST and plugin_available:
             # 插件优先
-            logger.info(f"插件优先模式已开启。请求辅助识别，标题：{log_name} ...")
+            logger.info(f"插件识别优先模式已开启。请求辅助识别，标题：{log_name} ...")
             mediainfo = plugin_fn()
             if not mediainfo:
                 logger.info(
-                    f"辅助识别未识别到 {log_context} 的媒体信息，尝试使用原生识别"
+                    f"辅助识别未识别到 {log_context} 的媒体信息，尝试使用原生识别 ..."
                 )
                 mediainfo = native_fn()
         else:
             # 原生优先
-            logger.info(f"插件优先模式未开启。尝试原生识别，标题：{log_name} ...")
+            logger.info(f"开始识别标题：{log_name} ...")
             mediainfo = native_fn()
             if not mediainfo and plugin_available:
                 logger.info(
-                    f"原生识别未识别到 {log_context} 的媒体信息，尝试使用辅助识别"
+                    f"未识别到 {log_context} 的媒体信息，尝试使用辅助识别 ..."
                 )
                 mediainfo = plugin_fn()
         return mediainfo
