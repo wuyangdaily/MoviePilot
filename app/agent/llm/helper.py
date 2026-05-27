@@ -137,6 +137,57 @@ def _get_httpx_proxy_key() -> str:
         return "proxies"
 
 
+def _resolve_llm_proxy(use_proxy: bool | None = None) -> str | None:
+    """
+    解析本次 LLM 调用应使用的系统代理地址。
+    """
+    should_use_proxy = settings.LLM_USE_PROXY if use_proxy is None else use_proxy
+    return settings.PROXY_HOST if should_use_proxy and settings.PROXY_HOST else None
+
+
+def _build_httpx_proxy_kwargs(proxy_url: str | None) -> dict[str, str]:
+    """
+    构造兼容当前 httpx 版本的代理参数。
+    """
+    if not proxy_url:
+        return {}
+    return {_get_httpx_proxy_key(): proxy_url}
+
+
+def _build_google_client_args(proxy_url: str | None) -> dict[str, Any]:
+    """
+    构造 Google SDK 透传给 httpx 的客户端参数。
+    """
+    return {
+        "trust_env": False,
+        **_build_httpx_proxy_kwargs(proxy_url),
+    }
+
+
+def _build_httpx_client(
+        proxy_url: str | None,
+        *,
+        async_client: bool = False,
+        timeout: float | None = None,
+):
+    """
+    构造显式代理策略的 httpx 客户端。
+
+    当关闭 LLM 代理时也返回 trust_env=False 的客户端，避免 httpx 自动读取
+    进程环境变量中的代理配置。
+    """
+    import httpx
+
+    client_cls = httpx.AsyncClient if async_client else httpx.Client
+    kwargs: dict[str, Any] = {
+        "trust_env": False,
+        **_build_httpx_proxy_kwargs(proxy_url),
+    }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    return client_cls(**kwargs)
+
+
 def _deepseek_thinking_toggle(extra_body: Any) -> bool | None:
     """
     解析 DeepSeek extra_body 中显式传入的 thinking 开关。
@@ -657,6 +708,38 @@ class LLMHelper:
         return headers or None
 
     @classmethod
+    def _should_use_openai_responses_api(
+            cls,
+            provider: str,
+            model: str | None,
+            runtime: dict[str, Any],
+    ) -> bool | None:
+        """
+        判断官方 ChatGPT API Key 模式是否应使用 Responses API。
+
+        GPT-5/o 系推理模型在 Chat Completions 中组合 function tools 与
+        reasoning_effort 时会被官方端点拒绝，因此 ChatGPT 官方 API Key
+        模式需要显式切到 Responses API；通用 OpenAI-compatible 入口保持
+        provider 目录解析出的默认行为，避免误伤第三方兼容服务。
+        """
+        runtime_use_responses_api = runtime.get("use_responses_api")
+        if runtime_use_responses_api is not None:
+            return bool(runtime_use_responses_api)
+
+        provider_name = (provider or "").strip().lower()
+        if provider_name != "chatgpt":
+            return None
+
+        base_url = str(runtime.get("base_url") or "").strip().lower()
+        if "api.openai.com" not in base_url:
+            return None
+
+        model_name = cls._normalize_model_name(model)
+        if model_name.startswith(("gpt-5", "o1", "o3", "o4")):
+            return True
+        return None
+
+    @classmethod
     def _resolve_thinking_level(
             cls,
             thinking_level: str | None = None,
@@ -701,6 +784,7 @@ class LLMHelper:
             base_url: str | None = None,
             base_url_preset: str | None = None,
             user_agent: str | None = None,
+            use_proxy: bool | None = None,
     ):
         """
         获取LLM实例
@@ -715,6 +799,7 @@ class LLMHelper:
         :param base_url: API Base URL。未显式传入时使用当前配置项 LLM_BASE_URL。
         :param base_url_preset: Base URL 预设。未显式传入时使用当前配置项 LLM_BASE_URL_PRESET。
         :param user_agent: OpenAI兼容接口请求 User-Agent。未显式传入时使用配置项 LLM_USER_AGENT。
+        :param use_proxy: 是否为本次 LLM 调用使用系统代理。未显式传入时使用配置项 LLM_USE_PROXY。
         :return: LLM实例
         """
         provider_name = str(provider if provider is not None else settings.LLM_PROVIDER).lower()
@@ -740,6 +825,7 @@ class LLMHelper:
                 base_url=base_url_value,
                 base_url_preset_id=base_url_preset_value,
                 user_agent=user_agent_value,
+                use_proxy=use_proxy,
             )
         except Exception as err:
             logger.debug(f"LLM provider 目录不可用，回退到旧运行时逻辑: {err}")
@@ -760,6 +846,12 @@ class LLMHelper:
             model=model_name,
             thinking_level=normalized_thinking_level,
         )
+        use_responses_api = cls._should_use_openai_responses_api(
+            provider=provider_name,
+            model=model_name,
+            runtime=runtime,
+        )
+        llm_proxy = _resolve_llm_proxy(use_proxy)
 
         if runtime["runtime"] == "google":
             # 修补 Gemini 2.5 思考模型的 thought_signature 兼容性
@@ -770,18 +862,13 @@ class LLMHelper:
             # 会导致工具调用时报错 400
             from langchain_google_genai import ChatGoogleGenerativeAI
 
-            client_args = None
-            if settings.PROXY_HOST:
-                proxy_key = _get_httpx_proxy_key()
-                client_args = {proxy_key: settings.PROXY_HOST}
-
             model = ChatGoogleGenerativeAI(
                 model=model_name,
                 api_key=runtime["api_key"],
                 retries=3,
                 temperature=settings.LLM_TEMPERATURE,
                 streaming=streaming,
-                client_args=client_args,
+                client_args=_build_google_client_args(llm_proxy),
                 **thinking_kwargs,
             )
         elif runtime["runtime"] == "deepseek":
@@ -796,6 +883,8 @@ class LLMHelper:
                 temperature=settings.LLM_TEMPERATURE,
                 streaming=streaming,
                 stream_usage=True,
+                http_client=_build_httpx_client(llm_proxy),
+                http_async_client=_build_httpx_client(llm_proxy, async_client=True),
                 **thinking_kwargs,
             )
         elif runtime["runtime"] in {"anthropic_compatible", "copilot_anthropic"}:
@@ -809,7 +898,7 @@ class LLMHelper:
                 temperature=settings.LLM_TEMPERATURE,
                 streaming=streaming,
                 stream_usage=True,
-                anthropic_proxy=settings.PROXY_HOST,
+                anthropic_proxy=llm_proxy,
                 default_headers=default_headers,
                 **thinking_kwargs,
             )
@@ -830,9 +919,17 @@ class LLMHelper:
                 temperature=settings.LLM_TEMPERATURE,
                 streaming=streaming,
                 stream_usage=True,
-                openai_proxy=settings.PROXY_HOST,
+                openai_proxy=llm_proxy,
+                **(
+                    {}
+                    if llm_proxy
+                    else {
+                        "http_client": _build_httpx_client(llm_proxy),
+                        "http_async_client": _build_httpx_client(llm_proxy, async_client=True),
+                    }
+                ),
                 default_headers=default_headers,
-                use_responses_api=runtime.get("use_responses_api"),
+                use_responses_api=use_responses_api,
                 **thinking_kwargs,
             )
 
@@ -908,6 +1005,7 @@ class LLMHelper:
             base_url: str | None = None,
             base_url_preset: str | None = None,
             user_agent: str | None = None,
+            use_proxy: bool | None = None,
     ) -> dict:
         """
         使用当前已保存配置执行一次最小 LLM 调用。
@@ -924,6 +1022,7 @@ class LLMHelper:
             base_url=base_url,
             base_url_preset=base_url_preset,
             user_agent=user_agent,
+            use_proxy=use_proxy,
         )
         try:
             response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=timeout)
@@ -955,6 +1054,7 @@ class LLMHelper:
             base_url: str | None = None,
             base_url_preset: str | None = None,
             user_agent: str | None = None,
+            use_proxy: bool | None = None,
             force_refresh: bool = False,
     ) -> List[dict[str, Any]]:
         """
@@ -973,6 +1073,7 @@ class LLMHelper:
                 base_url=base_url,
                 base_url_preset_id=base_url_preset,
                 user_agent=user_agent,
+                use_proxy=use_proxy,
                 force_refresh=force_refresh,
             )
         except Exception as err:
@@ -980,7 +1081,10 @@ class LLMHelper:
             if provider == "google":
                 return [
                     {"id": model_id, "name": model_id}
-                    for model_id in await self._get_google_models(api_key or "")
+                    for model_id in await self._get_google_models(
+                        api_key or "",
+                        use_proxy=use_proxy,
+                    )
                 ]
             try:
                 from app.agent.llm.provider import LLMProviderManager
@@ -1002,24 +1106,23 @@ class LLMHelper:
                     api_key or "",
                     model_list_base_url,
                     user_agent=user_agent,
+                    use_proxy=use_proxy,
                 )
             ]
 
     @staticmethod
-    async def _get_google_models(api_key: str) -> List[str]:
+    async def _get_google_models(api_key: str, use_proxy: bool | None = None) -> List[str]:
         """获取Google模型列表（使用 google-genai SDK v1）"""
         try:
             from google import genai
             from google.genai.types import HttpOptions
 
-            http_options = None
-            if settings.PROXY_HOST:
-                proxy_key = _get_httpx_proxy_key()
-                proxy_args = {proxy_key: settings.PROXY_HOST}
-                http_options = HttpOptions(
-                    client_args=proxy_args,
-                    async_client_args=proxy_args,
-                )
+            llm_proxy = _resolve_llm_proxy(use_proxy)
+            google_client_args = _build_google_client_args(llm_proxy)
+            http_options = HttpOptions(
+                client_args=google_client_args,
+                async_client_args=google_client_args,
+            )
 
             client = genai.Client(api_key=api_key, http_options=http_options)
             models = await client.aio.models.list()
@@ -1040,6 +1143,7 @@ class LLMHelper:
             api_key: str,
             base_url: str = None,
             user_agent: str | None = None,
+            use_proxy: bool | None = None,
     ) -> List[str]:
         """获取OpenAI兼容模型列表"""
         try:
@@ -1054,6 +1158,11 @@ class LLMHelper:
                 default_headers=LLMHelper._build_openai_default_headers(
                     None,
                     user_agent=user_agent,
+                ),
+                http_client=_build_httpx_client(
+                    _resolve_llm_proxy(use_proxy),
+                    async_client=True,
+                    timeout=15.0,
                 ),
             )
             models = await client.models.list()
