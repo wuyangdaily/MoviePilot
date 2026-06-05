@@ -70,6 +70,8 @@ _DEFAULT_MAX_KEEPALIVE_CONNECTIONS = 20
 _DEFAULT_MAX_CONNECTIONS = 40
 # 默认的 keep-alive 连接过期时间（秒）
 _DEFAULT_KEEPALIVE_EXPIRY = 30
+# 同步 requests.Session 复用连接时，遇到对端或代理关闭 keep-alive 后允许重试的方法
+_REQUESTS_RETRY_IDEMPOTENT_METHODS = ("GET", "HEAD", "OPTIONS")
 # 持有 LRU 淘汰后正在异步关闭的 transport task，避免 fire-and-forget 被 GC 警告
 _pending_eviction_tasks: set[asyncio.Task] = set()
 
@@ -90,6 +92,9 @@ def _get_shared_async_transport(
     会话级状态由调用方在外层 AsyncClient(transport=...) 实例化时单独配置，
     每次调用用完即销毁，因此天然无 jar 累积串扰。
     """
+    # 规范化代理：拒绝空字符串等非法值，防止 httpx 抛出 Unknown scheme for proxy URL
+    if proxy is not None and (not proxy or not proxy.strip()):
+        proxy = None
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -344,14 +349,47 @@ class RequestUtils:
         kwargs.setdefault("timeout", self._timeout)
         kwargs.setdefault("verify", False)
         kwargs.setdefault("stream", False)
+        method_upper = method.upper()
         try:
             return req_method(method, url, **kwargs)
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ReadTimeout,
+        ) as e:
+            if (
+                self._session is not None
+                and method_upper in _REQUESTS_RETRY_IDEMPOTENT_METHODS
+            ):
+                logger.debug(f"keep-alive 连接已失效，同步幂等请求重试一次: {e!r}")
+                try:
+                    self._session.close()
+                    return req_method(method, url, **kwargs)
+                except requests.exceptions.RequestException as retry_error:
+                    error_msg = (
+                        str(retry_error)
+                        if str(retry_error)
+                        else f"未知网络错误 (URL: {url}, Method: {method_upper})"
+                    )
+                    logger.debug(f"重试后同步请求仍失败: {error_msg}")
+                    if raise_exception:
+                        raise
+                    return None
+            error_msg = (
+                str(e)
+                if str(e)
+                else f"未知网络错误 (URL: {url}, Method: {method_upper})"
+            )
+            logger.debug(f"同步请求失败(不重试): {error_msg}")
+            if raise_exception:
+                raise
+            return None
         except requests.exceptions.RequestException as e:
             # 获取更详细的错误信息
             error_msg = (
                 str(e)
                 if str(e)
-                else f"未知网络错误 (URL: {url}, Method: {method.upper()})"
+                else f"未知网络错误 (URL: {url}, Method: {method_upper})"
             )
             logger.debug(f"请求失败: {error_msg}")
             if raise_exception:
@@ -864,12 +902,17 @@ class AsyncRequestUtils:
 
         # 如果已经是字符串格式，直接返回
         if isinstance(proxies, str):
-            return proxies
+            return proxies.strip() or None
 
         # 如果是字典格式，提取http或https代理
         if isinstance(proxies, dict):
             # 优先使用https代理，如果没有则使用http代理
-            proxy_url = proxies.get("https") or proxies.get("http")
+            # 先各自 strip，避免空白字符串阻断裂合取或回退到 http 代理
+            https_proxy = proxies.get("https")
+            http_proxy = proxies.get("http")
+            https_proxy = https_proxy.strip() if isinstance(https_proxy, str) else None
+            http_proxy = http_proxy.strip() if isinstance(http_proxy, str) else None
+            proxy_url = https_proxy or http_proxy
             if proxy_url:
                 return proxy_url
 

@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from app.schemas.types import MediaType
+from app.testing import stub_modules
 
 
 def _load_subscribe_chain_class():
@@ -16,13 +17,11 @@ def _load_subscribe_chain_class():
         module = sys.modules[module_name]
         return module, module.SubscribeChain
 
-    original_modules = {}
+    stub_deps = {}
 
     def ensure_module(name: str, module: types.ModuleType):
-        """临时替换模块依赖，并记录原模块以便加载完成后恢复。"""
-        if name not in original_modules:
-            original_modules[name] = sys.modules.get(name)
-        sys.modules[name] = module
+        """登记一个加载期临时替换模块；实际替换与精确还原由 stub_modules 在加载时统一处理。"""
+        stub_deps[name] = module
         return module
 
     chain_module = ensure_module("app.chain", types.ModuleType("app.chain"))
@@ -298,18 +297,12 @@ def _load_subscribe_chain_class():
     subscribe_path = Path(__file__).resolve().parents[1] / "app" / "chain" / "subscribe.py"
     spec = importlib.util.spec_from_file_location(module_name, subscribe_path)
     module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
     assert spec and spec.loader
-    spec.loader.exec_module(module)
-    module._injected_modules = {
-        name: sys.modules.get(name)
-        for name in original_modules
-    }
-    for injected_name, original_module in original_modules.items():
-        if original_module is None:
-            sys.modules.pop(injected_name, None)
-        else:
-            sys.modules[injected_name] = original_module
+    # 加载期用 stub_modules 精确替换依赖、退出时统一还原；module_name 非桩，缓存入 sys.modules 供复用
+    with stub_modules(stub_deps):
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        module._injected_modules = {name: sys.modules.get(name) for name in stub_deps}
     return module, module.SubscribeChain
 
 
@@ -462,6 +455,69 @@ class SubscribeChainTest(TestCase):
 
         self.assertEqual(SubscribeChain.get_best_version_current_priority(subscribe), 100)
         self.assertTrue(SubscribeChain.is_best_version_complete(subscribe))
+
+    def test_get_subscribe_no_exists_expands_whole_missing_when_custom_start_skips_existing_range(self):
+        """自定义开始集跳过季初集数时，缺失整季需要转成显式目标集。"""
+        no_exists = {
+            "media-key": {
+                1: SimpleNamespace(season=1, episodes=[], total_episode=48, start_episode=1)
+            }
+        }
+
+        exist_flag, result = SubscribeChain._SubscribeChain__get_subscribe_no_exits(
+            subscribe_name="主角 S01",
+            no_exists=no_exists,
+            mediakey="media-key",
+            begin_season=1,
+            total_episode=48,
+            start_episode=44,
+        )
+
+        self.assertFalse(exist_flag)
+        self.assertEqual(result["media-key"][1].episodes, [44, 45, 46, 47, 48])
+        self.assertEqual(result["media-key"][1].start_episode, 44)
+        self.assertEqual(result["media-key"][1].total_episode, 48)
+
+    def test_get_subscribe_no_exists_keeps_whole_missing_when_custom_start_matches_original_start(self):
+        """自定义开始集没有缩小范围时，仍保留空集列表表示整季缺失。"""
+        no_exists = {
+            "media-key": {
+                1: SimpleNamespace(season=1, episodes=[], total_episode=48, start_episode=1)
+            }
+        }
+
+        exist_flag, result = SubscribeChain._SubscribeChain__get_subscribe_no_exits(
+            subscribe_name="主角 S01",
+            no_exists=no_exists,
+            mediakey="media-key",
+            begin_season=1,
+            total_episode=48,
+            start_episode=1,
+        )
+
+        self.assertFalse(exist_flag)
+        self.assertEqual(result["media-key"][1].episodes, [])
+        self.assertEqual(result["media-key"][1].start_episode, 1)
+        self.assertEqual(result["media-key"][1].total_episode, 48)
+
+    def test_best_version_full_pack_first_keeps_whole_missing_for_custom_start_episode(self):
+        """分集洗版优先全集时，空集列表仍表示下载链按整季资源处理。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=0,
+            start_episode=44,
+            total_episode=48,
+            episode_priority={str(episode): 80 for episode in range(44, 49)},
+        )
+
+        result = SubscribeChain._SubscribeChain__build_full_pack_first_no_exists(
+            subscribe=subscribe,
+            mediakey="media-key",
+        )
+
+        self.assertEqual(result["media-key"][1].episodes, [])
+        self.assertEqual(result["media-key"][1].start_episode, 44)
+        self.assertEqual(result["media-key"][1].total_episode, 48)
 
     def test_is_episode_range_covered_matches_pending_episodes(self):
         subscribe = self._build_subscribe(
