@@ -450,7 +450,7 @@ class SiteSpider:
             return
         selector = self.fields.get('size', {})
         item = self._safe_query(torrent, selector)
-        if item:
+        if item is not None and item != "":
             size_val = item.replace("\n", "").strip()
             size_val = self.__filter_text(size_val,
                                           selector.get('filters'))
@@ -492,7 +492,7 @@ class SiteSpider:
             return
         selector = self.fields.get('grabs', {})
         item = self._safe_query(torrent, selector)
-        if item:
+        if item is not None and item != "":
             grabs_val = item.split("/")[0]
             grabs_val = grabs_val.replace(",", "")
             grabs_val = self.__filter_text(grabs_val, selector.get('filters'))
@@ -672,6 +672,9 @@ class SiteSpider:
         """
         if not link:
             return None
+        parsed_link = urlparse(link)
+        if parsed_link.scheme:
+            return link
         if not link.startswith("http"):
             if link.startswith("//"):
                 return self.domain.split(":")[0] + ":" + link
@@ -773,6 +776,8 @@ class SiteSpider:
             ):
                 self.__get_subtitle_field(subtitle, field_name)
             self.__fill_subtitle_ids()
+            if not self.torrents_info.get("title") or not self.torrents_info.get("enclosure"):
+                return {}
             return self.torrents_info.copy() if self.torrents_info else {}
         except Exception as err:
             logger.error("%s 字幕搜索出现错误：%s" % (self.indexername, str(err)))
@@ -831,6 +836,9 @@ class SiteSpider:
 
     @staticmethod
     def __attribute_or_text(item: Any, selector: Optional[dict]) -> list:
+        """
+        获取查询结果的属性或文本列表。
+        """
         if not selector:
             return item
         if not item:
@@ -843,6 +851,9 @@ class SiteSpider:
 
     @staticmethod
     def __index(items: Optional[list], selector: Optional[dict]) -> Optional[str]:
+        """
+        按配置下标读取查询结果。
+        """
         if not items:
             return None
         if selector:
@@ -858,6 +869,25 @@ class SiteSpider:
             item = items[0]
         return item
 
+    @staticmethod
+    def __is_login_or_permission_page(html_doc: Any) -> bool:
+        """
+        判断返回内容是否是登录或权限提示页。
+        """
+        title = (html_doc("title").text() or "").strip()
+        page_text = " ".join((html_doc.text() or "").split())[:1000]
+        if title == "登录" or ":: 登录" in title:
+            return True
+        return any(
+            marker in page_text
+            for marker in (
+                "未登录",
+                "登录 / 注册",
+                "必须在登录后才能访问",
+                "你需要启用cookies才能登录",
+            )
+        )
+
     def parse(self, html_text: str) -> List[dict]:
         """
         解析整个页面
@@ -865,6 +895,21 @@ class SiteSpider:
         if not html_text:
             self.is_error = True
             return []
+
+        try:
+            status_doc = PyQuery(html_text)
+            if self.__is_login_or_permission_page(status_doc):
+                self.is_error = True
+                logger.warn(f"错误：{self.indexername} 返回登录或权限提示页")
+                return []
+        except Exception as err:
+            self.is_error = True
+            logger.warn(f"错误：{self.indexername} {str(err)}")
+            return []
+        finally:
+            if 'status_doc' in locals():
+                status_doc.clear()  # noqa
+                del status_doc
 
         if self.search_type == "subtitles":
             rust_subtitles = rust_accel.parse_indexer_subtitles(
@@ -896,8 +941,9 @@ class SiteSpider:
             html_doc = PyQuery(html_text)
             # 种子筛选器
             torrents_selector = self.list.get('selector', '')
+            rows = html_doc(torrents_selector)
             # 遍历种子html列表
-            for i, torn in enumerate(html_doc(torrents_selector)):
+            for i, torn in enumerate(rows):
                 if i >= int(self.result_num):
                     break
                 # 创建临时PyQuery对象进行解析
