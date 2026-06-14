@@ -1,7 +1,11 @@
 import asyncio
+import io
 import json
+import re
+import zipfile
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, Union, Annotated
 from urllib.parse import urljoin, urlparse
 
@@ -62,6 +66,100 @@ _PUBLIC_SYSTEM_CONFIG_KEYS = {
     )
 }
 _PUBLIC_SETTINGS_KEYS = {"PLUGIN_MARKET"}
+_LOG_DOWNLOAD_LIMIT = 10
+_LOG_DOWNLOAD_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_PLUGIN_MARKET_WIKI_START = "<!-- plugin-market-repos:start -->"
+_PLUGIN_MARKET_WIKI_END = "<!-- plugin-market-repos:end -->"
+_PLUGIN_MARKET_WIKI_URL = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Wiki/main/plugin.md"
+_PLUGIN_MARKET_REPO_PATTERN = re.compile(
+    r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_plugin_market_repo_url(repo_url: str) -> Optional[str]:
+    """
+    规范化插件仓库地址，便于跨来源合并去重。
+    """
+    repo_url = (repo_url or "").strip().rstrip("/")
+    if not repo_url:
+        return None
+    repo_url = repo_url.removesuffix(".git")
+    parsed_url = urlparse(repo_url)
+    if parsed_url.scheme not in {"http", "https"}:
+        return None
+    if (parsed_url.hostname or "").lower() != "github.com":
+        return None
+    paths = [item for item in parsed_url.path.split("/") if item]
+    if len(paths) < 2:
+        return None
+    return f"https://github.com/{paths[0]}/{paths[1]}"
+
+
+def _is_allowed_plugin_market_wiki_url(wiki_url: str) -> bool:
+    """
+    校验插件市场 Wiki 地址是否属于固定文档源。
+    """
+    parsed_url = urlparse(wiki_url)
+    if parsed_url.scheme != "https":
+        return False
+    if (parsed_url.hostname or "").lower() != "raw.githubusercontent.com":
+        return False
+    return bool(
+        re.fullmatch(
+            r"/jxxghp/MoviePilot-Wiki/[^/]+/plugin\.md",
+            parsed_url.path,
+        )
+    )
+
+
+def _split_plugin_market_repo_urls(value: Optional[str]) -> list[str]:
+    """
+    拆分插件市场仓库配置并保持原有顺序去重。
+    """
+    repos: list[str] = []
+    seen_repos = set()
+    for item in re.split(r"[\n,，]+", value or ""):
+        normalized_repo = _normalize_plugin_market_repo_url(item)
+        if not normalized_repo or normalized_repo.lower() in seen_repos:
+            continue
+        repos.append(normalized_repo)
+        seen_repos.add(normalized_repo.lower())
+    return repos
+
+
+def _extract_plugin_market_repos_from_wiki(markdown: str) -> list[str]:
+    """
+    从 Wiki 插件文档中提取插件仓库地址。
+    """
+    content = markdown or ""
+    if _PLUGIN_MARKET_WIKI_START in content and _PLUGIN_MARKET_WIKI_END in content:
+        content = content.split(_PLUGIN_MARKET_WIKI_START, 1)[1].split(_PLUGIN_MARKET_WIKI_END, 1)[0]
+
+    repos: list[str] = []
+    seen_repos = set()
+    for item in _PLUGIN_MARKET_REPO_PATTERN.findall(content):
+        normalized_repo = _normalize_plugin_market_repo_url(item)
+        if not normalized_repo or normalized_repo.lower() in seen_repos:
+            continue
+        repos.append(normalized_repo)
+        seen_repos.add(normalized_repo.lower())
+    return repos
+
+
+def _merge_plugin_market_repos(local_repos: list[str], wiki_repos: list[str]) -> list[str]:
+    """
+    合并本地与 Wiki 插件仓库地址，保留本地顺序并追加 Wiki 新地址。
+    """
+    merged_repos: list[str] = []
+    seen_repos = set()
+    for repo in local_repos + wiki_repos:
+        normalized_repo = _normalize_plugin_market_repo_url(repo)
+        if not normalized_repo or normalized_repo.lower() in seen_repos:
+            continue
+        merged_repos.append(normalized_repo)
+        seen_repos.add(normalized_repo.lower())
+    return merged_repos
 
 
 def _match_nettest_prefix(url: str, prefix: str) -> bool:
@@ -283,6 +381,98 @@ def _build_nettest_rules() -> list[dict[str, Any]]:
             },
         )
     return rules
+
+
+def _collect_named_log_files(name: str) -> list[Path]:
+    """
+    根据前端传入的日志标识收集可下载日志文件。
+
+    `moviepilot` 固定表示主程序日志，其余标识按插件 ID 处理并映射到
+    `plugins/<plugin_id>.log*`。这里不接收路径或后缀，避免下载入口变成任意
+    日志文件选择器；滚动日志按当前文件优先、备份文件按修改时间倒序补足。
+    """
+    normalized_name = (name or "").strip().lower()
+    if not normalized_name or not _LOG_DOWNLOAD_NAME_PATTERN.fullmatch(normalized_name):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    log_root = settings.LOG_PATH
+    if normalized_name == "moviepilot":
+        log_dir = log_root
+        log_prefix = "moviepilot.log"
+    else:
+        log_dir = log_root / "plugins"
+        log_prefix = f"{normalized_name}.log"
+
+    if not log_dir.exists() or not log_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    current_log = log_dir / log_prefix
+    backup_logs = [
+        item
+        for item in log_dir.iterdir()
+        if item.is_file() and item.name.startswith(f"{log_prefix}.")
+    ]
+    backup_logs.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+
+    log_files = []
+    if current_log.exists() and current_log.is_file():
+        log_files.append(current_log)
+    log_files.extend(backup_logs)
+    return log_files[:_LOG_DOWNLOAD_LIMIT]
+
+
+def _verify_log_resource_superuser(
+    token_payload: schemas.TokenPayload = Depends(verify_resource_token),
+) -> schemas.TokenPayload:
+    """
+    校验日志资源访问权限。
+
+    日志接口通过浏览器新窗口和 EventSource 访问，不能依赖普通 API 请求头；
+    因此这里复用资源 Cookie 完成身份识别，再额外要求管理员身份，避免普通
+    登录用户读取可能包含敏感信息的日志。
+    """
+    if not token_payload.super_user:
+        raise HTTPException(status_code=403, detail="用户权限不足")
+    return token_payload
+
+
+async def _build_log_zip_response(name: str) -> StreamingResponse:
+    """
+    将指定日志标识对应的日志文件打包为 zip 响应。
+
+    打包前逐个校验文件仍位于日志根目录内，避免符号链接或并发文件变更绕过
+    `name` 到固定目录的映射约束。zip 内使用日志根目录相对路径，便于区分
+    主程序日志与插件日志。
+    """
+    log_files = _collect_named_log_files(name)
+    if not log_files:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    log_root = settings.LOG_PATH
+    async_log_root = AsyncPath(log_root)
+    zip_buffer = io.BytesIO()
+    filename_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_name = (name or "logs").strip().lower() or "logs"
+    zip_stem = f"{safe_name}-logs-{filename_time}"
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for log_file in log_files:
+            if not await SecurityUtils.async_is_safe_path(
+                base_path=async_log_root,
+                user_path=AsyncPath(log_file),
+            ):
+                raise HTTPException(status_code=404, detail="Not Found")
+            arcname = f"{zip_stem}/{log_file.name}"
+            archive.write(log_file, arcname)
+
+    zip_buffer.seek(0)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{zip_stem}.zip"'
+    }
+    return StreamingResponse(
+        iter([zip_buffer.getvalue()]),
+        media_type="application/zip",
+        headers=headers,
+    )
 
 
 def _validate_nettest_url(url: str) -> Optional[str]:
@@ -625,6 +815,73 @@ async def get_public_setting(
     return schemas.Response(success=True, data={"value": value})
 
 
+@router.post(
+    "/setting/PLUGIN_MARKET/sync-wiki",
+    summary="从Wiki同步插件市场仓库",
+    response_model=schemas.Response,
+)
+async def sync_plugin_market_from_wiki(
+    request: Optional[schemas.PluginMarketSyncRequest] = Body(default=None),
+    _: User = Depends(get_current_active_superuser_async),
+) -> schemas.Response:
+    """
+    从 Wiki 插件文档同步插件市场仓库地址。
+    """
+    wiki_url = (request.wiki_url if request else None) or _PLUGIN_MARKET_WIKI_URL
+    wiki_url = wiki_url.strip()
+    if not _is_allowed_plugin_market_wiki_url(wiki_url):
+        return schemas.Response(success=False, message="不支持的 Wiki 同步地址")
+
+    res = await AsyncRequestUtils(
+        ua=settings.USER_AGENT,
+        proxies=settings.PROXY,
+        timeout=30,
+        content_type=None,
+        accept_type="text/plain,*/*",
+    ).get_res(wiki_url)
+    if res is None:
+        return schemas.Response(success=False, message="无法访问 Wiki 插件仓库清单")
+    if res.status_code != 200:
+        return schemas.Response(
+            success=False,
+            message=f"访问 Wiki 插件仓库清单失败，状态码：{res.status_code}",
+        )
+
+    wiki_repos = _extract_plugin_market_repos_from_wiki(res.text)
+    if not wiki_repos:
+        return schemas.Response(success=False, message="未在 Wiki 中识别到插件仓库地址")
+
+    local_repos = _split_plugin_market_repo_urls(settings.PLUGIN_MARKET)
+    local_repo_keys = {repo.lower() for repo in local_repos}
+    added_count = len([repo for repo in wiki_repos if repo.lower() not in local_repo_keys])
+    merged_repos = _merge_plugin_market_repos(local_repos, wiki_repos)
+    merged_value = ",".join(merged_repos)
+
+    success, message = settings.update_setting("PLUGIN_MARKET", merged_value)
+    if success:
+        await eventmanager.async_send_event(
+            etype=EventType.ConfigChanged,
+            data=ConfigChangeEventData(
+                key="PLUGIN_MARKET", value=merged_value, change_type="update"
+            ),
+        )
+    elif success is None:
+        success = True
+
+    return schemas.Response(
+        success=success,
+        message=message,
+        data={
+            "value": merged_value,
+            "repos": merged_repos,
+            "wiki_repos": wiki_repos,
+            "added_count": added_count,
+            "total_count": len(merged_repos),
+            "source_url": wiki_url,
+        },
+    )
+
+
 @router.get("/setting/{key}", summary="查询系统设置", response_model=schemas.Response)
 async def get_setting(
     key: str, _: User = Depends(get_current_active_superuser_async)
@@ -705,7 +962,7 @@ async def get_logging(
     request: Request,
     length: Optional[int] = 50,
     logfile: Optional[str] = "moviepilot.log",
-    _: schemas.TokenPayload = Depends(verify_resource_token),
+    _: schemas.TokenPayload = Depends(_verify_log_resource_superuser),
 ):
     """
     实时获取系统日志
@@ -812,6 +1069,17 @@ async def get_logging(
     else:
         # 返回SSE流响应
         return StreamingResponse(log_generator(), media_type="text/event-stream")
+
+
+@router.get("/logging/download/{name}", summary="下载日志")
+async def download_logging(
+    name: str,
+    _: schemas.TokenPayload = Depends(_verify_log_resource_superuser),
+):
+    """
+    按日志标识下载主程序或插件滚动日志，返回 zip 文件。
+    """
+    return await _build_log_zip_response(name)
 
 
 @router.get(

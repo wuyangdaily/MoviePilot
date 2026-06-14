@@ -360,7 +360,6 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
                 if runtime_pid:
                     last_sync_time = self._recent_local_sync.get(runtime_pid)
                     if last_sync_time and time.time() - last_sync_time < 2:
-                        logger.debug(f"忽略本地插件同步产生的运行目录变化：{runtime_pid}")
                         continue
                     # 运行目录变化只重载，不能反向触发本地同步。
                     plugins_to_reload.add(runtime_pid)
@@ -1081,7 +1080,7 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
                 logger.error(f"获取插件[{plugin_id}]仪表盘元数据出错：{str(e)}")
         return dashboard_meta
 
-    def get_plugin_dashboard(self, pid: str, key: str, user_agent: str = None) -> schemas.PluginDashboard:
+    def get_plugin_dashboard(self, pid: str, key: str, user_agent: str = None) -> Optional[schemas.PluginDashboard]:
         """
         获取插件仪表盘
         """
@@ -1114,6 +1113,12 @@ class PluginManager(ConfigReloadMixin, metaclass=Singleton):
             logger.error(f"插件 {pid} 调用方法 get_dashboard 出错: {str(e)}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                 detail=f"插件 {pid} 调用方法 get_dashboard 出错: {str(e)}")
+        if dashboard is None:
+            return None
+        if not isinstance(dashboard, (tuple, list)) or len(dashboard) != 3:
+            logger.error(f"插件 {pid} 返回的仪表盘数据格式错误")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                detail=f"插件 {pid} 返回的仪表盘数据格式错误")
         cols, attrs, elements = dashboard
         return schemas.PluginDashboard(
             id=pid,

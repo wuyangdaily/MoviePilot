@@ -114,6 +114,7 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 | :--- | :--- | :--- |
 | GET | `/api/v1/system/ping` | 登录用户服务存活检测，用于前端重启后轮询恢复状态 |
 | GET | `/api/v1/system/setting/public/{key}` | 登录用户读取白名单内非敏感系统设置，仅支持目录、存储、站点范围、默认订阅规则、Follow 订阅者和插件市场地址等前端必需配置 |
+| POST | `/api/v1/system/setting/PLUGIN_MARKET/sync-wiki` | 管理员从 MoviePilot Wiki 的插件文档同步公开插件仓库清单，和本地 `PLUGIN_MARKET` 合并去重后写入配置 |
 
 ### 插件补充接口
 
@@ -207,6 +208,19 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 ```
 
 `search_engine` 可选，通过 DDGS 支持 `auto`、`duckduckgo`、`google`、`brave`、`yahoo`、`wikipedia`、`yandex`、`mojeek`。`site_url` 可选，用于限定搜索到指定域名或 URL 路径范围。搜索默认使用系统代理配置。
+
+**`browse_webpage` 浏览器操作示例**:
+```json
+{
+  "tool_name": "browse_webpage",
+  "arguments": {
+    "action": "goto",
+    "url": "https://example.com"
+  }
+}
+```
+
+`browse_webpage` 使用持久浏览器会话，默认以当前 Agent 会话作为 `session_key`。`goto`、`snapshot`、`click`、`click_ref`、`fill`、`fill_ref`、`select`、`select_ref`、`wait` 等动作会返回页面快照，快照中的 `interactive_elements[].ref` 可用于后续 `*_ref` 操作。支持 `list_tabs`、`open_tab`、`focus_tab`、`close_tab` 管理标签页，支持 `close_session` 释放会话。出于安全考虑，默认拒绝访问 localhost、环回地址、私网地址和链路本地地址；确需访问可信内网或本机页面时，可显式传入 `allow_private_network: true`。
 
 ### 3. 获取工具详情
 
