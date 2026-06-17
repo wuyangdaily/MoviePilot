@@ -163,6 +163,8 @@ EVENT_TYPE_NAMES = {
 
 # 同步链式事件
 class ChainEventType(Enum):
+    # 插件数据重置前
+    PluginDataReset = "plugin.data.reset"
     # 名称识别
     NameRecognize = "name.recognize"
     # 认证验证
@@ -342,6 +344,7 @@ class MessageChannel(Enum):
     SynologyChat = "SynologyChat"
     VoceChat = "VoceChat"
     Web = "Web"
+    WebAgent = "WebAgent"
     WebPush = "WebPush"
     QQ = "QQ"
 
