@@ -371,7 +371,7 @@ class MoviePilotAgent:
                 HumanMessage(content=str(message).strip()[:1000]),
             ]
         )
-        content = LLMHelper._extract_text_content(getattr(response, "content", response))
+        content = LLMHelper.extract_text_content(getattr(response, "content", response))
         return self._sanitize_chat_title(content)
 
     async def prepare_chat_title(self, message: str) -> None:
@@ -534,7 +534,7 @@ class MoviePilotAgent:
     @property
     def is_background(self) -> bool:
         """
-        是否为后台任务模式（无渠道信息，如定时唤醒）
+        是否为无需回传捕获内容的后台任务模式。
         """
         return (not self.channel or not self.source) and not callable(self.output_callback)
 
@@ -554,6 +554,13 @@ class MoviePilotAgent:
         否则会让这类高频后台调用持续带入无关动态上下文，影响缓存命中率。
         """
         return self.session_id.startswith(HEARTBEAT_SESSION_PREFIX)
+
+    @property
+    def has_message_context(self) -> bool:
+        """
+        是否具备真实消息渠道上下文。
+        """
+        return bool(self.channel and self.source)
 
     async def _is_system_admin_context(self) -> bool:
         """
@@ -728,39 +735,6 @@ class MoviePilotAgent:
         """
         runtime_config = await self._resolve_llm_runtime_config()
         return await LLMHelper.get_llm(streaming=streaming, **runtime_config)
-
-    @staticmethod
-    def _extract_text_content(content) -> str:
-        """
-        从消息内容中提取纯文本，过滤掉思考/推理类型的内容块。
-        :param content: 消息内容，可能是字符串或内容块列表
-        :return: 纯文本内容
-        """
-        if not content:
-            return ""
-        # 跳过思考/推理类型的内容块
-        if isinstance(content, list):
-            text_parts = []
-            for block in content:
-                if isinstance(block, str):
-                    text_parts.append(block)
-                elif isinstance(block, dict):
-                    # 优先检查 thought 标志（LangChain Google GenAI 方案）
-                    if block.get("thought"):
-                        continue
-                    if block.get("type") in (
-                            "thinking",
-                            "reasoning_content",
-                            "reasoning",
-                            "thought",
-                    ):
-                        continue
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-                    else:
-                        text_parts.append(str(block))
-            return "".join(text_parts)
-        return str(content)
 
     @classmethod
     def _has_image_input_content(cls, content: Any) -> bool:
@@ -1042,7 +1016,7 @@ class MoviePilotAgent:
                 UsageMiddleware(on_usage=self._record_usage),
             ]
 
-            if not self.is_heartbeat_session:
+            if self.has_message_context:
                 middlewares.insert(
                     4,
                     ActivityLogMiddleware(
@@ -1095,9 +1069,9 @@ class MoviePilotAgent:
             self._streamed_output = ""
 
             # 获取历史消息
-            messages = memory_manager.get_agent_messages(
+            messages = list(memory_manager.get_agent_messages(
                 session_id=self.session_id, user_id=self.user_id
-            )
+            ))
 
             # 构建结构化用户消息内容
             request_payload = {
@@ -1203,8 +1177,9 @@ class MoviePilotAgent:
             )
         return attachments
 
+    @staticmethod
     async def _stream_agent_tokens(
-            self, agent, messages: dict, config: dict, on_token: Callable[[str], None]
+            agent, messages: dict, config: dict, on_token: Callable[[str], None]
     ):
         """
         流式运行智能体，过滤工具调用token和思考内容，将模型生成的内容通过回调输出。
@@ -1243,7 +1218,7 @@ class MoviePilotAgent:
 
                 if token.content:
                     # content 可能是字符串或内容块列表，过滤掉思考类型的块
-                    content = self._extract_text_content(token.content)
+                    content = LLMHelper.extract_text_content(token.content)
                     if content:
                         stripper.process(content, on_token)
 
@@ -1262,6 +1237,7 @@ class MoviePilotAgent:
         self._agent_started_at = datetime.now()
         self._llm_runtime_config = None
         self._llm_provider_selection = {}
+        streaming_stopped = False
         try:
             # Agent运行配置
             agent_config = {
@@ -1309,6 +1285,7 @@ class MoviePilotAgent:
                     all_sent_via_stream,
                     streamed_text,
                 ) = await self.stream_handler.stop_streaming()
+                streaming_stopped = True
 
                 if not all_sent_via_stream:
                     # 流式输出未能发送全部内容（发送失败等）
@@ -1344,7 +1321,7 @@ class MoviePilotAgent:
                 for msg in reversed(final_messages):
                     if hasattr(msg, "type") and msg.type == "ai" and msg.content:
                         # 过滤掉思考/推理内容，只提取纯文本
-                        text = self._extract_text_content(msg.content)
+                        text = LLMHelper.extract_text_content(msg.content)
                         if text:
                             # 过滤掉包含在 <think> 标签中的内容
                             text = re.sub(
@@ -1377,11 +1354,14 @@ class MoviePilotAgent:
                 )
                 for msg in reversed(final_messages):
                     if hasattr(msg, "type") and msg.type == "ai" and msg.content:
-                        display_text = self._extract_text_content(msg.content).strip()
+                        display_text = LLMHelper.extract_text_content(msg.content).strip()
                         break
             self._save_assistant_display_message_once(display_text)
 
-            if self._should_persist_agent_chat():
+            if (
+                    self._should_persist_agent_chat()
+                    and not self._tool_context.get("user_reply_sent")
+            ):
                 memory_manager.save_agent_messages(
                     session_id=self.session_id,
                     user_id=self.user_id,
@@ -1411,7 +1391,8 @@ class MoviePilotAgent:
                 error=execution_error,
             )
             # 确保停止流式输出
-            await self.stream_handler.stop_streaming()
+            if not streaming_stopped:
+                await self.stream_handler.stop_streaming()
 
     async def send_agent_message(self, message: str, title: str = ""):
         """
