@@ -1604,6 +1604,7 @@ class MoviePilotAgent:
                 original_chat_id=self.original_chat_id,
                 title=title,
                 text=message,
+                save_history=False,
             )
         )
 
@@ -1742,6 +1743,12 @@ class AgentManager:
             return True
         queue = self._session_queues.get(session_id)
         return bool(queue and not queue.empty())
+
+    def is_session_busy(self, session_id: str) -> bool:
+        """
+        查询会话是否仍有正在执行或排队的任务。
+        """
+        return self._is_session_busy(session_id)
 
     def _expired_idle_sessions(self) -> list[tuple[str, str]]:
         """
