@@ -18,7 +18,7 @@ from app.core.meta import MetaBase
 from app.core.metainfo import MetaInfo
 from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db.mediaserver_oper import MediaServerOper
-from app.helper.directory import DirectoryHelper
+from app.helper.directory import DirectoryHelper, validate_download_save_path
 from app.helper.thread import ThreadHelper
 from app.helper.torrent import TorrentHelper
 from app.log import logger
@@ -107,19 +107,27 @@ class DownloadChain(ChainBase):
     def _resolve_media_download_dir(
             media_info: MediaInfo,
             save_path: Optional[str] = None,
-    ) -> Union[str, Path]:
+    ) -> Tuple[Optional[str], Optional[Path], str]:
         """
         根据媒体信息解析下载目录。
         """
         storage = 'local'
-        if save_path:
-            return storage, Path(save_path)
+        if save_path is not None:
+            try:
+                validated_save_path = validate_download_save_path(save_path)
+            except ValueError as err:
+                logger.warn(str(err))
+                return None, None, str(err)
+            if re.match(r"^[A-Za-z]:/", validated_save_path):
+                return storage, Path(validated_save_path), ""
+            file_uri = FileURI.from_uri(validated_save_path)
+            return file_uri.storage or storage, Path(file_uri.path), ""
 
         dir_info = DirectoryHelper().get_dir(media_info, include_unsorted=True)
         storage = dir_info.storage if dir_info else storage
         if not dir_info:
             logger.error(f"未找到下载目录：{media_info.type.value} {media_info.title_year}")
-            return None
+            return None, None, "未找到下载目录"
 
         if not dir_info.media_type and dir_info.download_type_folder:
             download_dir = Path(dir_info.download_path) / media_info.type.value
@@ -129,7 +137,7 @@ class DownloadChain(ChainBase):
         if not dir_info.media_category and dir_info.download_category_folder and media_info.category:
             download_dir = download_dir / media_info.category
 
-        return storage, download_dir
+        return storage, download_dir, ""
 
     @staticmethod
     def _upload_subtitle_file(
@@ -293,12 +301,12 @@ class DownloadChain(ChainBase):
         if not mediainfo:
             return False, "无法识别媒体信息", []
 
-        storage, target_dir = self._resolve_media_download_dir(
+        storage, target_dir, error_msg = self._resolve_media_download_dir(
             media_info=mediainfo,
             save_path=save_path,
         )
         if not target_dir:
-            return False, "未找到下载目录", []
+            return False, error_msg or "未找到下载目录", []
 
         request = RequestUtils(
             cookies=subtitle.site_cookie,
@@ -478,7 +486,8 @@ class DownloadChain(ChainBase):
                         userid: Union[str, int] = None,
                         username: Optional[str] = None,
                         label: Optional[str] = None,
-                        return_detail: bool = False) -> Union[Optional[str], Tuple[Optional[str], Optional[str]]]:
+                        return_detail: bool = False,
+                        custom_words: Optional[str] = None) -> Union[Optional[str], Tuple[Optional[str], Optional[str]]]:
         """
         下载及发送通知
         :param context: 资源上下文
@@ -493,6 +502,7 @@ class DownloadChain(ChainBase):
         :param username: 调用下载的用户名/插件名
         :param label: 自定义标签
         :param return_detail: 是否返回详细结果；False 时返回下载任务 hash 或 None，True 时返回 (hash, error_msg)
+        :param custom_words: 下载来源（如订阅）的完整自定义识别词文本，随下载记录存档，供整理时原样复现识别
         :return: return_detail=False 时返回下载任务 hash 或 None；return_detail=True 时返回 (hash, error_msg)
         """
         _torrent = context.torrent_info
@@ -525,8 +535,15 @@ class DownloadChain(ChainBase):
                     f"Reason: {event_data.reason}")
                 return (None, "下载被事件取消") if return_detail else None
             # 如果事件修改了下载路径，使用新路径
-            if event_data.options and event_data.options.get("save_path"):
+            if event_data.options and "save_path" in event_data.options:
                 save_path = event_data.options.get("save_path")
+
+        if save_path is not None:
+            try:
+                save_path = validate_download_save_path(save_path)
+            except ValueError as err:
+                logger.warn(str(err))
+                return (None, str(err)) if return_detail else None
 
         # 补充完整的media数据
         if not _media.genre_ids:
@@ -568,7 +585,7 @@ class DownloadChain(ChainBase):
 
         storage = 'local'
         # 下载目录
-        if save_path:
+        if save_path is not None:
             download_dir = Path(save_path)
         else:
             # 根据媒体信息查询下载目录配置
@@ -649,7 +666,8 @@ class DownloadChain(ChainBase):
                 date=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 media_category=_media.category,
                 episode_group=_media.episode_group,
-                note={"source": source}
+                note={"source": source},
+                custom_words=custom_words
             )
 
             # 登记下载文件
@@ -738,7 +756,8 @@ class DownloadChain(ChainBase):
                        source: Optional[str] = None,
                        userid: Optional[str] = None,
                        username: Optional[str] = None,
-                       downloader: Optional[str] = None
+                       downloader: Optional[str] = None,
+                       custom_words: Optional[str] = None
                        ) -> Tuple[List[Context], Dict[Union[int, str], Dict[int, NotExistMediaInfo]]]:
         """
         根据缺失数据，自动种子列表中组合择优下载
@@ -750,6 +769,7 @@ class DownloadChain(ChainBase):
         :param userid:  用户ID
         :param username: 调用下载的用户名/插件名
         :param downloader: 下载器
+        :param custom_words: 下载来源（如订阅）的完整自定义识别词文本，随下载记录存档，供整理时原样复现识别
         :return: 已经下载的资源列表、剩余未下载到的剧集 no_exists[tmdb_id/douban_id] = {season: NotExistMediaInfo}
         """
         # 已下载的项目
@@ -890,7 +910,7 @@ class DownloadChain(ChainBase):
                 logger.info(f"开始下载电影 {context.torrent_info.title} ...")
                 if self.download_single(context, save_path=save_path, channel=channel,
                                         source=source, userid=userid, username=username,
-                                        downloader=downloader):
+                                        downloader=downloader, custom_words=custom_words):
                     # 下载成功
                     logger.info(f"{context.torrent_info.title} 添加下载成功")
                     downloaded_list.append(context)
@@ -993,7 +1013,8 @@ class DownloadChain(ChainBase):
                                         source=source,
                                         userid=userid,
                                         username=username,
-                                        downloader=downloader
+                                        downloader=downloader,
+                                        custom_words=custom_words
                                     )
                             else:
                                 # 下载
@@ -1001,7 +1022,8 @@ class DownloadChain(ChainBase):
                                 download_id = self.download_single(context, save_path=save_path,
                                                                    channel=channel, source=source,
                                                                    userid=userid, username=username,
-                                                                   downloader=downloader)
+                                                                   downloader=downloader,
+                                                                   custom_words=custom_words)
 
                             if download_id:
                                 # 下载成功
@@ -1085,7 +1107,8 @@ class DownloadChain(ChainBase):
                                 download_id = self.download_single(context, save_path=save_path,
                                                                    channel=channel, source=source,
                                                                    userid=userid, username=username,
-                                                                   downloader=downloader)
+                                                                   downloader=downloader,
+                                                                   custom_words=custom_words)
                                 if download_id:
                                     # 下载成功
                                     if __requires_complete_coverage(tv):
@@ -1182,7 +1205,8 @@ class DownloadChain(ChainBase):
                                 source=source,
                                 userid=userid,
                                 username=username,
-                                downloader=downloader
+                                downloader=downloader,
+                                custom_words=custom_words
                             )
                             if not download_id:
                                 continue

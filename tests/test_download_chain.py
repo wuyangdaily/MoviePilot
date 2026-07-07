@@ -7,7 +7,7 @@ from app.chain.download import DownloadChain
 from app.core.config import settings
 from app.core.context import Context, MediaInfo, SubtitleInfo, TorrentInfo
 from app.core.metainfo import MetaInfo
-from app.schemas import FileItem, NotExistMediaInfo
+from app.schemas import FileItem, NotExistMediaInfo, TransferDirectoryConf
 from app.schemas.types import MediaType
 
 
@@ -41,6 +41,20 @@ class _FakeThreadHelper:
 
     def submit(self, func, *args, **kwargs):
         self.submitted.append((func, args, kwargs))
+
+
+def _download_dirs():
+    """
+    构造下载成功路径测试使用的允许下载目录配置。
+    """
+    return [
+        TransferDirectoryConf(
+            name="本地下载",
+            priority=1,
+            storage="local",
+            download_path="/downloads",
+        ),
+    ]
 
 
 class _FakeSubtitleStorageChain:
@@ -106,6 +120,10 @@ def test_download_single_submits_download_added_to_background(monkeypatch):
     添加下载成功后，站点字幕等后处理应提交到后台，不能阻塞下载接口返回。
     """
     _FakeThreadHelper.submitted = []
+    monkeypatch.setattr(
+        "app.helper.directory.DirectoryHelper.get_download_dirs",
+        lambda _self: _download_dirs(),
+    )
     monkeypatch.setattr(download_module, "ThreadHelper", _FakeThreadHelper)
     monkeypatch.setattr(download_module, "DownloadHistoryOper", _FakeDownloadHistoryOper)
     monkeypatch.setattr(download_module, "TorrentHelper", _FakeTorrentHelper)
@@ -156,6 +174,65 @@ def test_download_single_submits_download_added_to_background(monkeypatch):
         download_dir=Path("/downloads"),
         torrent_content=b"torrent-content",
     )
+
+
+def test_download_single_persists_custom_words_snapshot(monkeypatch):
+    """下载成功登记历史时，应把传入的订阅识别词原样存入快照，供整理时原样复现识别。"""
+    captured = {}
+
+    class _CapturingDownloadHistoryOper:
+        """捕获写入下载历史的字段，验证识别词快照确实落库。"""
+
+        def add(self, **kwargs):
+            captured.update(kwargs)
+
+        def add_files(self, _files):
+            pass
+
+    _FakeThreadHelper.submitted = []
+    monkeypatch.setattr(
+        "app.helper.directory.DirectoryHelper.get_download_dirs",
+        lambda _self: _download_dirs(),
+    )
+    monkeypatch.setattr(download_module, "ThreadHelper", _FakeThreadHelper)
+    monkeypatch.setattr(download_module, "DownloadHistoryOper", _CapturingDownloadHistoryOper)
+    monkeypatch.setattr(download_module, "TorrentHelper", _FakeTorrentHelper)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.download = MagicMock(return_value=("qb", "hash123", "Original", "添加下载成功"))
+    chain.download_added = MagicMock()
+    chain.eventmanager = MagicMock()
+    chain.eventmanager.send_event.return_value = None
+    chain.post_message = MagicMock()
+
+    context = Context(
+        meta_info=MetaInfo("Demo Show 2024"),
+        media_info=MediaInfo(
+            type=MediaType.TV,
+            title="Demo Show",
+            year="2024",
+            tmdb_id=1,
+            genre_ids=[18],
+        ),
+        torrent_info=TorrentInfo(
+            title="Demo Show 2024",
+            enclosure="https://example.com/demo.torrent",
+            site_cookie="uid=1",
+            site_name="TestSite",
+        ),
+    )
+
+    custom_words = "S04 => S01\n第 <> 集 >> EP+66"
+    result = chain.download_single(
+        context=context,
+        torrent_content=b"torrent-content",
+        save_path="/downloads",
+        username="tester",
+        custom_words=custom_words,
+    )
+
+    assert result == "hash123"
+    assert captured["custom_words"] == custom_words
 
 
 def test_save_subtitle_response_creates_missing_temp_directory(monkeypatch, tmp_path):
@@ -466,6 +543,29 @@ def test_batch_download_does_not_download_duplicate_movie_after_success(monkeypa
     assert lefts is None
     chain.download_single.assert_called_once()
     assert chain.download_single.call_args.args[0] is first_context
+
+
+def test_batch_download_threads_custom_words_to_download_single(monkeypatch):
+    """订阅识别词须经 batch_download 透传到 download_single，作为整理快照随下载存档。"""
+    _FakeBatchTorrentHelper.episodes = []
+    monkeypatch.setattr(download_module, "TorrentHelper", _FakeBatchTorrentHelper)
+    monkeypatch.setattr(download_module.eventmanager, "send_event", lambda *args, **kwargs: None)
+
+    chain = DownloadChain.__new__(DownloadChain)
+    chain.download_single = MagicMock(return_value="hash")
+
+    context = SimpleNamespace(
+        media_info=SimpleNamespace(type=MediaType.MOVIE, title_year="Demo Movie (2026)"),
+        meta_info=SimpleNamespace(season_episode=""),
+        torrent_info=SimpleNamespace(title="Demo Movie"),
+    )
+
+    custom_words = "S04 => S01\n第 <> 集 >> EP+66"
+    downloads, _lefts = chain.batch_download(contexts=[context], custom_words=custom_words)
+
+    assert downloads == [context]
+    chain.download_single.assert_called_once()
+    assert chain.download_single.call_args.kwargs["custom_words"] == custom_words
 
 
 def test_batch_download_accepts_complete_coverage_when_files_cover_target_range(monkeypatch):

@@ -309,6 +309,86 @@ def test_telegram_module_passes_parse_mode_to_client():
     assert client.send_msg.call_args.kwargs["parse_mode"] == "HTML"
 
 
+def test_telegram_module_passes_force_reply_to_client():
+    """模块发送通知时应透传消息指定的force_reply"""
+    module = TelegramModule()
+    client = Mock()
+
+    with patch.object(
+        module,
+        "get_configs",
+        return_value={"telegram-test": SimpleNamespace(name="telegram-test")},
+    ), patch.object(
+        module, "check_message", return_value=True
+    ), patch.object(
+        module, "get_instance", return_value=client
+    ):
+        module.post_message(
+            Notification(
+                channel=MessageChannel.Telegram,
+                source="telegram-test",
+                title="请输入目录",
+                text="回复目录路径",
+                force_reply=True,
+            )
+        )
+
+    client.send_msg.assert_called_once()
+    assert client.send_msg.call_args.kwargs["force_reply"] is True
+
+
+def test_send_msg_with_force_reply_uses_force_reply_when_no_buttons(telegram):
+    """无按钮时force_reply应生成Telegram ForceReply标记"""
+    result = telegram.send_msg(
+        title="请输入目录",
+        text="回复目录路径",
+        force_reply=True,
+    )
+
+    assert result and result.get("success")
+    send_kwargs = telegram.bot.send_message.call_args.kwargs
+    reply_markup = send_kwargs["reply_markup"]
+    assert reply_markup.__class__.__name__ == "ForceReply"
+    if hasattr(reply_markup, "to_dict"):
+        assert reply_markup.to_dict()["force_reply"] is True
+        assert reply_markup.to_dict().get("selective") is True
+    else:
+        assert getattr(reply_markup, "selective", None) is True
+
+
+def test_send_msg_with_force_reply_keeps_inline_keyboard_when_buttons_exist(telegram):
+    """按钮存在时force_reply不能覆盖InlineKeyboardMarkup"""
+    result = telegram.send_msg(
+        title="请选择目录",
+        text="点击按钮选择",
+        buttons=[[{"text": "默认", "callback_data": "default"}]],
+        force_reply=True,
+    )
+
+    assert result and result.get("success")
+    send_kwargs = telegram.bot.send_message.call_args.kwargs
+    reply_markup = send_kwargs["reply_markup"]
+    assert reply_markup.__class__.__name__ == "InlineKeyboardMarkup"
+
+
+def test_send_msg_with_force_reply_and_original_message_sends_new_prompt(telegram):
+    """编辑消息场景不能带ForceReply，应改为发送新的回复提示。"""
+    result = telegram.send_msg(
+        title="请输入关键词",
+        text="回复节目关键词",
+        force_reply=True,
+        original_message_id=123,
+        original_chat_id="group-1",
+    )
+
+    assert result and result.get("success")
+    telegram.bot.edit_message_text.assert_not_called()
+    send_kwargs = telegram.bot.send_message.call_args.kwargs
+    assert send_kwargs["chat_id"] == "group-1"
+    assert send_kwargs["reply_to_message_id"] == 123
+    assert send_kwargs["reply_markup"].__class__.__name__ == "ForceReply"
+
+
 def test_edit_msg_falls_back_to_caption_when_original_message_has_no_text(telegram):
     """编辑图片消息时应在文本编辑失败后回退为 caption 编辑。"""
     telegram.bot.edit_message_text.side_effect = Exception(
@@ -354,8 +434,8 @@ def test_edit_msg_with_html_parse_mode_keeps_html(telegram):
     assert edit_kwargs["text"] == "<b>标题</b>\n<blockquote>请选择</blockquote>"
 
 
-def test_edit_msg_keeps_other_edit_errors_failed(telegram):
-    """非图片 caption 场景的编辑错误不应被错误标记为成功。"""
+def test_edit_msg_treats_message_not_modified_as_success(telegram):
+    """重复编辑相同内容时应视为成功，避免记录错误日志。"""
     telegram.bot.edit_message_text.side_effect = Exception(
         "Bad Request: message is not modified"
     )
@@ -367,6 +447,36 @@ def test_edit_msg_keeps_other_edit_errors_failed(telegram):
         text="测试内容",
     )
 
-    assert result is False
+    assert result is True
     telegram.bot.edit_message_text.assert_called_once()
     telegram.bot.edit_message_caption.assert_not_called()
+
+
+def test_send_msg_edit_with_image_falls_back_to_text_when_image_url_unavailable(telegram):
+    """编辑图片消息失败时应去掉图片并降级为文本编辑。"""
+    telegram.bot.edit_message_media.side_effect = Exception(
+        "Bad Request: failed to get HTTP URL content"
+    )
+
+    result = telegram.send_msg(
+        title="测试标题",
+        text="测试内容",
+        image="https://example.com/poster.jpg",
+        buttons=[[{"text": "确认", "callback_data": "confirm"}]],
+        original_chat_id="1051253579",
+        original_message_id=110502,
+    )
+
+    assert result == {
+        "success": True,
+        "message_id": 110502,
+        "chat_id": "1051253579",
+    }
+    telegram.bot.edit_message_media.assert_called_once()
+    telegram.bot.edit_message_text.assert_called_once()
+    edit_kwargs = telegram.bot.edit_message_text.call_args.kwargs
+    assert edit_kwargs["chat_id"] == "1051253579"
+    assert edit_kwargs["message_id"] == 110502
+    assert "测试标题" in edit_kwargs["text"]
+    assert "测试内容" in edit_kwargs["text"]
+    assert edit_kwargs["reply_markup"] is not None

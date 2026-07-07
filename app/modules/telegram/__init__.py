@@ -21,6 +21,10 @@ from app.utils.structures import DictUtils
 
 
 class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
+    """
+    Telegram 通知模块，负责模块生命周期、消息解析和通知发送。
+    """
+
     def init_module(self) -> None:
         """
         初始化模块
@@ -32,6 +36,9 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
 
     @staticmethod
     def get_name() -> str:
+        """
+        获取模块名称
+        """
         return "Telegram"
 
     @staticmethod
@@ -75,6 +82,9 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
         return True, ""
 
     def init_setting(self) -> Tuple[str, Union[str, bool]]:
+        """
+        获取模块初始化配置项。
+        """
         pass
 
     @staticmethod
@@ -511,6 +521,7 @@ class TelegramModule(_ModuleBase, _MessageBase[Telegram]):
                         userid=userid,
                         link=message.link,
                         buttons=message.buttons,
+                        force_reply=message.force_reply,
                         original_message_id=message.original_message_id,
                         original_chat_id=message.original_chat_id,
                         disable_web_page_preview=message.disable_web_page_preview,
