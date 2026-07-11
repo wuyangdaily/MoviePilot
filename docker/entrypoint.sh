@@ -20,6 +20,16 @@ function WARN() {
     echo -e "${WARN} ${1}"
 }
 
+function normalize_env_value() {
+    printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+function is_truthy_value() {
+    local value
+    value="$(normalize_env_value "${1:-}")"
+    [ "${value}" = "true" ] || [ "${value}" = "1" ] || [ "${value}" = "yes" ]
+}
+
 # 设置虚拟环境路径（兼容群晖等系统必须这样配置）
 VENV_PATH="${VENV_PATH:-/opt/venv}"
 export PATH="${VENV_PATH}/bin:$PATH"
@@ -65,6 +75,7 @@ function load_config_from_app_env() {
         ["GITHUB_TOKEN"]=""
         ["MOVIEPILOT_AUTO_UPDATE"]="release"
         ["MOVIEPILOT_DOCKER_KEEPALIVE_ON_FAILURE"]="true"
+        ["MOVIEPILOT_FORCE_CHOWN"]="false"
         ["MOVIEPILOT_SAFE_MODE"]="false"
         ["BROWSER_EMULATION"]="cloakbrowser"
 
@@ -261,8 +272,8 @@ function graceful_exit() {
 # 后端异常退出时默认保留容器，避免无法 docker exec 进入容器运行 doctor。
 function diagnostic_keepalive() {
     local exit_code=${1:-1}
-    local keepalive="${MOVIEPILOT_DOCKER_KEEPALIVE_ON_FAILURE:-true}"
-    keepalive="${keepalive,,}"
+    local keepalive
+    keepalive="$(normalize_env_value "${MOVIEPILOT_DOCKER_KEEPALIVE_ON_FAILURE:-true}")"
 
     if [ "${keepalive}" = "false" ] || [ "${keepalive}" = "0" ] || [ "${keepalive}" = "no" ]; then
         graceful_exit "$exit_code" "python_exit"
@@ -315,6 +326,70 @@ function ensure_backend_runtime_dependencies() {
     INFO "→ 已自动恢复主程序依赖，继续启动后端。"
 }
 
+function path_owner_id() {
+    local target="${1:-}"
+    [ -n "${target}" ] || return 0
+    stat -c '%u:%g' "${target}" 2>/dev/null || stat -f '%u:%g' "${target}" 2>/dev/null || true
+}
+
+function force_chown_image_paths_if_requested() {
+    if ! is_truthy_value "${MOVIEPILOT_FORCE_CHOWN:-false}"; then
+        return 0
+    fi
+
+    WARN "→ MOVIEPILOT_FORCE_CHOWN 已启用，将递归修复 /app、/public 权限，可能显著增加启动耗时。"
+
+    local path
+    for path in "$@"; do
+        [ -e "${path}" ] || continue
+        chown -R moviepilot:moviepilot "${path}"
+    done
+}
+
+function correct_home_permissions() {
+    [ -e "${HOME}" ] || return 0
+
+    chown moviepilot:moviepilot "${HOME}"
+    [ -e "${HOME}/.cloakbrowser" ] && chown -h moviepilot:moviepilot "${HOME}/.cloakbrowser"
+
+    if is_truthy_value "${MOVIEPILOT_FORCE_CHOWN:-false}"; then
+        [ -e "${HOME}/.cloakbrowser" ] && chown -R moviepilot:moviepilot "${HOME}/.cloakbrowser"
+    elif [ -e "${HOME}/.cloakbrowser" ]; then
+        INFO "→ 默认跳过 ${HOME}/.cloakbrowser 递归权限校正，如遇浏览器缓存权限错误可设置 MOVIEPILOT_FORCE_CHOWN=true 后重启一次。"
+    fi
+
+    find "${HOME}" -mindepth 1 -maxdepth 1 ! -name ".cloakbrowser" -exec chown -R moviepilot:moviepilot {} +
+}
+
+function chown_plugin_runtime_path() {
+    local plugin_path="${1:-}"
+    [ -n "${plugin_path}" ] || return 0
+    [ -e "${plugin_path}" ] || return 0
+    local current_owner
+    current_owner="$(path_owner_id "${plugin_path}")"
+    [ "${current_owner}" = "${PUID}:${PGID}" ] && return 0
+    chown -h moviepilot:moviepilot "${plugin_path}"
+}
+
+function correct_file_permissions() {
+    local chown_start
+    local chown_end
+    chown_start=$(date +%s)
+
+    INFO "→ 正在校正文件权限..."
+    force_chown_image_paths_if_requested /app /public
+    chown_plugin_runtime_path /app/app/plugins
+    correct_home_permissions
+    chown -R moviepilot:moviepilot \
+        "${CONFIG_DIR}" \
+        /var/lib/nginx \
+        /var/log/nginx
+    chown moviepilot:moviepilot /etc/hosts /tmp
+
+    chown_end=$(date +%s)
+    INFO "→ 文件权限校正完成，耗时 $(( chown_end - chown_start )) 秒。"
+}
+
 # 使用env配置
 load_config_from_app_env
 apply_package_cache_env
@@ -354,14 +429,7 @@ groupmod -o -g "${PGID}" moviepilot
 usermod -o -u "${PUID}" moviepilot
 
 # 更改文件权限
-chown -R moviepilot:moviepilot \
-    "${HOME}" \
-    /app \
-    /public \
-    "${CONFIG_DIR}" \
-    /var/lib/nginx \
-    /var/log/nginx
-chown moviepilot:moviepilot /etc/hosts /tmp
+correct_file_permissions
 
 # 启动前优先确认主运行环境仍然健康，避免插件依赖污染导致服务直接起不来。
 ensure_backend_runtime_dependencies
@@ -369,7 +437,7 @@ ensure_backend_runtime_dependencies
 # 下载浏览器内核
 function install_browser_kernel() {
   local emulation="${BROWSER_EMULATION:-cloakbrowser}"
-  emulation="${emulation,,}"
+  emulation="$(normalize_env_value "${emulation}")"
   local proxy="${HTTPS_PROXY:-${https_proxy:-$PROXY_HOST}}"
 
   if [ "${emulation}" != "cloakbrowser" ] && [ "${emulation}" != "flaresolverr" ] && [ -n "${emulation}" ]; then
