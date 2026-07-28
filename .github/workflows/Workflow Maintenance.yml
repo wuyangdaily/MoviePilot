@@ -1,0 +1,25 @@
+name: Workflow Maintenance
+
+on:
+  schedule:
+    - cron: "0 16 * * *"   # 每天北京时间 0 点（UTC 16:00）
+  workflow_dispatch:
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # 删除旧 workflow 运行记录
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 1
