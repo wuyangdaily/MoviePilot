@@ -178,7 +178,7 @@ class ConfigModel(BaseModel):
     PACKAGE_CACHE_DAYS: int = 90
     # pip/uv 包下载缓存根目录，留空时使用配置目录下的 .cache
     PACKAGE_CACHE_ROOT: Optional[str] = None
-    # 元数据识别缓存过期时间（小时），0为自动
+    # 单条元数据识别缓存有效期（小时），0为自动
     META_CACHE_EXPIRE: int = 0
 
     # ==================== 网络代理配置 ====================
@@ -430,26 +430,7 @@ class ConfigModel(BaseModel):
     # ==================== 插件配置 ====================
     # 插件市场仓库地址，多个地址使用,分隔，地址以/结尾
     PLUGIN_MARKET: str = (
-        "https://github.com/jxxghp/MoviePilot-Plugins,"
-        "https://github.com/thsrite/MoviePilot-Plugins,"
-        "https://github.com/honue/MoviePilot-Plugins,"
-        "https://github.com/InfinityPacer/MoviePilot-Plugins,"
-        "https://github.com/DDSRem-Dev/MoviePilot-Plugins,"
-        "https://github.com/madrays/MoviePilot-Plugins,"
-        "https://github.com/justzerock/MoviePilot-Plugins,"
-        "https://github.com/KoWming/MoviePilot-Plugins,"
-        "https://github.com/wikrin/MoviePilot-Plugins,"
-        "https://github.com/HankunYu/MoviePilot-Plugins,"
-        "https://github.com/baozaodetudou/MoviePilot-Plugins,"
-        "https://github.com/Aqr-K/MoviePilot-Plugins,"
-        "https://github.com/hotlcc/MoviePilot-Plugins-Third,"
-        "https://github.com/gxterry/MoviePilot-Plugins,"
-        "https://github.com/DzAvril/MoviePilot-Plugins,"
-        "https://github.com/mrtian2016/MoviePilot-Plugins,"
-        "https://github.com/Hqyel/MoviePilot-Plugins-Third,"
-        "https://github.com/xijin285/MoviePilot-Plugins,"
-        "https://github.com/Seed680/MoviePilot-Plugins,"
-        "https://github.com/imaliang/MoviePilot-Plugins"
+        "https://github.com/jxxghp/MoviePilot-Plugins"
     )
     # 插件安装数据共享
     PLUGIN_STATISTIC_SHARE: bool = True
@@ -571,6 +552,8 @@ class ConfigModel(BaseModel):
     LLM_THINKING_LEVEL: Optional[str] = "off"
     # OpenAI兼容接口API协议：auto（自动）/ chat_completions / responses
     LLM_API_PROTOCOL: str = "auto"
+    # 联网搜索模式：local（本地）/ builtin（模型服务端）/ auto（自动）/ disabled（关闭）
+    LLM_WEB_SEARCH_MODE: str = "local"
     # LLM是否支持图片输入，开启后消息图片会按多模态输入发送给模型
     LLM_SUPPORT_IMAGE_INPUT: bool = True
     # 是否启用音频输入，开启后用户语音会先转写为文本再进入 Agent
