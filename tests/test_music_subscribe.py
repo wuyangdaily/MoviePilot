@@ -1,7 +1,8 @@
+import asyncio
 from contextlib import contextmanager
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -11,8 +12,13 @@ from app.application.subscription.contract import (
     SubscriptionSnapshot,
     build_subscribe_meta,
 )
+from app.application.subscription.execution import (
+    SubscriptionExecutionAdmission,
+    SubscriptionExecutionContext,
+)
 from app.application.subscription.mutation import SubscriptionMutation
-from app.chain.subscribe import SubscribeChain
+from app.application.subscription.sitebudget import SubscriptionSearchCancelled
+from app.chain.subscribe.facade import SubscribeChain
 from app.domain.context import (
     MUSIC_ENTITY_ALBUM,
     MUSIC_ENTITY_ARTIST,
@@ -22,6 +28,7 @@ from app.domain.context import (
     TorrentInfo,
 )
 from app.domain.meta.metamusic import MetaMusic
+from app.schemas.category import ClassificationSelection
 from app.schemas.types import MediaSource, MediaType
 
 
@@ -94,6 +101,19 @@ def _subscribe(**overrides) -> SimpleNamespace:
     return subscribe
 
 
+def _music_recognition_chain(
+        recognized: MusicInfo | None = None,
+) -> Mock:
+    """构造同时支持同步、异步识别与分类收口的媒体链替身。"""
+    media_chain = Mock()
+    media_chain.recognize_media.return_value = recognized
+    media_chain.async_recognize_media = AsyncMock(return_value=recognized)
+    media_chain._finalize_recognition_result.side_effect = (
+        lambda mediainfo, **_kwargs: mediainfo
+    )
+    return media_chain
+
+
 def _configure_subscription_write(chain, repository) -> None:
     """为音乐测试链注入显式同步修改作用域。"""
     chain.subscription_repository = repository
@@ -118,6 +138,23 @@ def _configure_subscription_write(chain, repository) -> None:
         yield SimpleNamespace(update=update)
 
     chain.sync_subscription_mutation_scope = mutation_scope
+
+
+def _execution_context(*, cancelled=None) -> SubscriptionExecutionContext:
+    """构造音乐订阅使用的独立执行上下文。"""
+    admission = SubscriptionExecutionAdmission()
+    lease = admission.try_acquire(
+        subscription_id=7,
+        operation="search",
+        ttl_seconds=60,
+    )
+    assert lease is not None
+    return SubscriptionExecutionContext(
+        lease=lease,
+        admission=admission,
+        task_id="music-task-7",
+        cancel_requested=cancelled,
+    )
 
 
 def test_build_subscribe_meta_returns_music_meta():
@@ -188,6 +225,85 @@ def test_music_subscribe_reuses_search_download_and_finish_flow():
     assert matched_context.meta_info.audio_format == "FLAC"
     assert matched_context.meta_info.audio_lossless is True
     chain.finish_subscribe_or_not.assert_called_once()
+
+
+def test_music_search_honours_cancel_before_external_work():
+    """音乐搜索在安全边界收到取消后不得继续访问站点。"""
+    subscribe = _subscribe()
+    chain = SubscribeChain()
+    execution_context = _execution_context(cancelled=lambda: True)
+
+    with patch("app.chain._music.SearchChain") as search_chain, \
+            pytest.raises(SubscriptionSearchCancelled):
+        chain._search_music_subscribe(
+            subscribe,
+            execution_context=execution_context,
+        )
+
+    search_chain.assert_not_called()
+
+
+def test_music_download_marks_shared_execution_context_before_side_effect():
+    """音乐下载必须把取消和副作用边界传入统一下载治理。"""
+    cancelled = [False]
+    subscribe = _subscribe()
+    target = _music_info()
+    downloaded = Context(
+        torrent_info=TorrentInfo(
+            title="周杰伦 - 晴天 FLAC",
+            category=MediaType.MUSIC.value,
+        ),
+        meta_info=MetaMusic.from_music_info(target),
+        media_info=target,
+    )
+    execution_context = _execution_context(cancelled=lambda: cancelled[0])
+    download_chain = Mock()
+
+    def batch_download(**kwargs):
+        """模拟下载器边界内开始提交后才收到取消。"""
+        governance = kwargs["governance"]
+        assert governance.cancelled() is False
+        governance.mark_started()
+        cancelled[0] = True
+        return [downloaded], None
+
+    download_chain.batch_download.side_effect = batch_download
+    repository = Mock()
+    repository.get.return_value = subscribe
+    chain = SubscribeChain()
+    chain.subscription_repository = repository
+    chain.finish_subscribe_or_not = Mock()
+
+    with patch("app.chain._music.DownloadChain", return_value=download_chain):
+        chain._download_music_subscribe(
+            subscribe,
+            target,
+            [downloaded],
+            execution_context=execution_context,
+        )
+
+    assert execution_context.download_started is True
+    chain.finish_subscribe_or_not.assert_called_once()
+
+
+def test_music_download_rechecks_paused_state_before_submission():
+    """候选准备后暂停的音乐订阅不得进入下载器。"""
+    subscribe = _subscribe()
+    paused = _subscribe(state="S")
+    repository = Mock()
+    repository.get.return_value = paused
+    chain = SubscribeChain()
+    chain.subscription_repository = repository
+
+    with patch("app.chain._music.DownloadChain") as download_chain:
+        chain._download_music_subscribe(
+            subscribe,
+            _music_info(),
+            [Context()],
+            execution_context=_execution_context(),
+        )
+
+    download_chain.assert_not_called()
 
 
 def test_music_subscribe_filters_declared_bitrate_and_format():
@@ -274,6 +390,7 @@ def test_music_best_version_persists_downloaded_rule_priority():
     download_chain.batch_download.return_value = ([downloaded], None)
     subscribe_oper = Mock()
     updated = _subscribe(best_version=1, current_priority=100)
+    subscribe_oper.get.return_value = subscribe
     subscribe_oper.update.return_value = updated
     chain = SubscribeChain()
     chain.finish_subscribe_or_not = Mock()
@@ -507,9 +624,9 @@ def test_album_subscription_uses_persisted_snapshot_when_remote_detail_is_unavai
         music_type=MUSIC_ENTITY_ALBUM,
         total_tracks=11,
         description="周杰伦 · Album · 2003-07-31",
+        media_category=" 音乐 / 华语 // 专辑 ",
     )
-    media_chain = Mock()
-    media_chain.recognize_media.return_value = None
+    media_chain = _music_recognition_chain()
 
     with patch("app.chain._music.MediaChain", return_value=media_chain):
         restored = SubscribeChain._recognize_music_subscribe(subscribe)
@@ -518,18 +635,65 @@ def test_album_subscription_uses_persisted_snapshot_when_remote_detail_is_unavai
     assert restored.album == "叶惠美"
     assert restored.artists == ["周杰伦"]
     assert restored.total_tracks == 11
+    finalize_call = media_chain._finalize_recognition_result.call_args
+    assert finalize_call.args == (restored,)
+    assert finalize_call.kwargs["effective_override"] == ClassificationSelection(
+        category_path=["音乐", "华语", "专辑"],
+        source="subscription",
+    )
+
+
+def test_music_subscription_remote_result_uses_manual_category_override() -> None:
+    """远端音乐详情应在订阅边界应用去空段后的手工分类覆盖。"""
+    subscribe = _subscribe(media_category=" 音乐 / 华语 // 流行 ")
+    remote = _music_info()
+    media_chain = _music_recognition_chain(remote)
+
+    with patch("app.chain._music.MediaChain", return_value=media_chain):
+        restored = SubscribeChain._recognize_music_subscribe(subscribe)
+
+    assert restored is remote
+    finalize_call = media_chain._finalize_recognition_result.call_args
+    assert finalize_call.args == (remote,)
+    assert finalize_call.kwargs["effective_override"] == ClassificationSelection(
+        category_path=["音乐", "华语", "流行"],
+        source="subscription",
+    )
+
+
+def test_music_subscription_without_manual_category_keeps_automatic_classification() -> None:
+    """空白手工分类应传入 None，使最终分类服务继续执行自动规则。"""
+    subscribe = _subscribe(media_category=" / / ")
+    remote = _music_info()
+    automatic = _music_info()
+    automatic.set_library_category("音乐/自动")
+    media_chain = _music_recognition_chain(remote)
+    media_chain._finalize_recognition_result.side_effect = None
+    media_chain._finalize_recognition_result.return_value = automatic
+
+    with patch("app.chain._music.MediaChain", return_value=media_chain):
+        restored = SubscribeChain._recognize_music_subscribe(subscribe)
+
+    assert restored is automatic
+    assert restored.library_category == "音乐/自动"
+    finalize_call = media_chain._finalize_recognition_result.call_args
+    assert finalize_call.args == (remote,)
+    assert finalize_call.kwargs["effective_override"] is None
 
 
 def test_legacy_music_identity_failure_does_not_guess_entity_from_title():
     """旧订阅有标准 ID 却无实体类型时，识别失败后应保留订阅而不是误选标题搜索首项。"""
     subscribe = _subscribe(music_type=None)
-    media_chain = Mock()
-    media_chain.recognize_media.return_value = None
+    media_chain = _music_recognition_chain()
 
     with patch("app.chain._music.MediaChain", return_value=media_chain):
         restored = SubscribeChain._recognize_music_subscribe(subscribe)
 
     assert restored is None
+    media_chain._finalize_recognition_result.assert_called_once_with(
+        None,
+        effective_override=None,
+    )
 
 
 def test_album_subscription_without_remote_id_uses_persisted_entity_snapshot():
@@ -542,12 +706,17 @@ def test_album_subscription_without_remote_id_uses_persisted_entity_snapshot():
         total_tracks=11,
     )
 
-    with patch("app.chain._music.MediaChain") as media_chain:
+    media_chain = _music_recognition_chain()
+    with patch("app.chain._music.MediaChain", return_value=media_chain):
         restored = SubscribeChain._recognize_music_subscribe(subscribe)
 
     assert restored.music_type == MUSIC_ENTITY_ALBUM
     assert restored.total_tracks == 11
-    media_chain.assert_not_called()
+    media_chain.recognize_media.assert_not_called()
+    media_chain._finalize_recognition_result.assert_called_once_with(
+        restored,
+        effective_override=None,
+    )
 
 
 def test_legacy_music_without_identity_uses_recording_recognition_boundary():
@@ -558,8 +727,7 @@ def test_legacy_music_without_identity_uses_recording_recognition_boundary():
         music_type=None,
     )
     recording = _music_info()
-    media_chain = Mock()
-    media_chain.recognize_media.return_value = recording
+    media_chain = _music_recognition_chain(recording)
 
     with patch("app.chain._music.MediaChain", return_value=media_chain):
         restored = SubscribeChain._recognize_music_subscribe(subscribe)
@@ -581,13 +749,16 @@ def test_legacy_music_subscription_rejects_artist_recognition_result():
         title="周杰伦",
         artists=["周杰伦"],
     )
-    media_chain = Mock()
-    media_chain.recognize_media.return_value = artist
+    media_chain = _music_recognition_chain(artist)
 
     with patch("app.chain._music.MediaChain", return_value=media_chain):
         restored = SubscribeChain._recognize_music_subscribe(subscribe)
 
     assert restored is None
+    media_chain._finalize_recognition_result.assert_called_once_with(
+        None,
+        effective_override=None,
+    )
 
 
 def test_album_subscription_preserves_track_count_snapshot_when_remote_omits_it():
@@ -607,8 +778,7 @@ def test_album_subscription_preserves_track_count_snapshot_when_remote_omits_it(
         artists=["周杰伦"],
         total_tracks=None,
     )
-    media_chain = Mock()
-    media_chain.recognize_media.return_value = remote
+    media_chain = _music_recognition_chain(remote)
 
     with patch("app.chain._music.MediaChain", return_value=media_chain):
         restored = SubscribeChain._recognize_music_subscribe(subscribe)
@@ -616,6 +786,50 @@ def test_album_subscription_preserves_track_count_snapshot_when_remote_omits_it(
     assert restored is not remote
     assert restored.total_tracks == 11
     assert remote.total_tracks is None
+
+
+def test_async_music_subscription_remote_result_uses_manual_category_override() -> None:
+    """异步远端识别结果应使用与同步路径一致的订阅分类覆盖。"""
+    subscribe = _subscribe(media_category=" 音乐 / 欧美 / 摇滚 ")
+    remote = _music_info()
+    media_chain = _music_recognition_chain(remote)
+
+    with patch("app.chain._music.MediaChain", return_value=media_chain):
+        restored = asyncio.run(
+            SubscribeChain._async_recognize_music_subscribe(subscribe)
+        )
+
+    assert restored is remote
+    media_chain.async_recognize_media.assert_awaited_once()
+    finalize_call = media_chain._finalize_recognition_result.call_args
+    assert finalize_call.args == (remote,)
+    assert finalize_call.kwargs["effective_override"] == ClassificationSelection(
+        category_path=["音乐", "欧美", "摇滚"],
+        source="subscription",
+    )
+
+
+def test_async_music_subscription_fallback_snapshot_is_finalized() -> None:
+    """异步远端失败后的持久化快照也必须经过同一最终分类入口。"""
+    subscribe = _subscribe(
+        name="叶惠美",
+        music_type=MUSIC_ENTITY_ALBUM,
+        total_tracks=11,
+        media_category=None,
+    )
+    media_chain = _music_recognition_chain()
+
+    with patch("app.chain._music.MediaChain", return_value=media_chain):
+        restored = asyncio.run(
+            SubscribeChain._async_recognize_music_subscribe(subscribe)
+        )
+
+    assert restored.music_type == MUSIC_ENTITY_ALBUM
+    assert restored.total_tracks == 11
+    media_chain._finalize_recognition_result.assert_called_once_with(
+        restored,
+        effective_override=None,
+    )
 
 
 def test_album_subscription_finishes_only_after_confirmed_full_pack():

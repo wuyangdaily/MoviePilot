@@ -12,7 +12,7 @@ from app.application.configuration import ChainRuntimeConfig
 from app.runtime.stop import StopState, runtime_stop_state
 
 if TYPE_CHECKING:
-    from app.application.download.admission import SubscriptionDownloadRepository
+    from app.application.classification.execution import ClassificationExecutionPort
     from app.application.download.failures import DownloadFailureRepository
     from app.application.history import (
         DownloadHistoryRepository,
@@ -76,8 +76,8 @@ class ChainRuntimeContext:
     media_server_repository: MediaServerRepository
     download_failure_repository: DownloadFailureRepository
     user_repository: ChainUserRepository
+    classification_service: Optional[ClassificationExecutionPort] = None
     subscription_search_repository: Optional[SubscriptionSearchRepository] = None
-    subscription_download_repository: Optional[SubscriptionDownloadRepository] = None
     legacy_transfer_command: Optional[LegacyTransferCommand] = None
     durable_event_writer: Optional[ChainDurableEventWriter] = None
     configuration: ChainRuntimeConfig = field(
