@@ -125,11 +125,13 @@ def handle_subscription_search_deferred(
     deferred: SubscriptionSearchDeferred,
     record: Callable[..., None],
 ) -> None:
-    """把站点预算冲突重新入队，并记录为可恢复而非失败的任务结果。"""
+    """把站点暂时不可用的任务重新入队，而不是记录为搜索失败。"""
     requeued = queue.defer_task(
         task_id=task_id,
         lease_token=lease_token,
         available_at=deferred.retry_at,
+        phase="waiting_site_budget",
+        message="站点暂时忙，系统会自动继续搜索",
     )
     if requeued:
         record("requeued", "site_budget_deferred")
@@ -187,6 +189,7 @@ class SearchEnqueueResult:
     batch: SearchBatchSnapshot
     created_count: int
     coalesced_count: int
+    active_batch_ids: tuple[str, ...]
 
 
 class SubscriptionSearchRepository(Protocol):
@@ -201,6 +204,17 @@ class SubscriptionSearchRepository(Protocol):
         available_at_by_subscription: Optional[Mapping[int, str]] = None,
     ) -> SearchEnqueueResult:
         """按订阅 ID 和各自到期时间建立或合并活动任务。"""
+        ...
+
+    async def async_enqueue(
+        self,
+        *,
+        subscription_ids: tuple[int, ...],
+        source: str,
+        priority: int,
+        available_at_by_subscription: Optional[Mapping[int, str]] = None,
+    ) -> SearchEnqueueResult:
+        """在异步会话中建立或合并活动任务。"""
         ...
 
     def claim_next(self, *, owner: str, lease_seconds: int = 900) -> Optional[SearchTaskSnapshot]:
@@ -245,8 +259,10 @@ class SubscriptionSearchRepository(Protocol):
         task_id: str,
         lease_token: str,
         available_at: str,
+        phase: str = "waiting_site_budget",
+        message: Optional[str] = None,
     ) -> bool:
-        """把临时站点预算冲突任务退回队列，并设置下一次领取时间。"""
+        """把临时不可执行任务退回队列，并保留用户可理解的等待原因。"""
         ...
 
     def is_cancel_requested(self, task_id: str) -> bool:
