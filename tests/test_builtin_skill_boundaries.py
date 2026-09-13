@@ -115,9 +115,9 @@ def test_modified_builtin_skills_have_incremented_versions() -> None:
     expected_versions = {
         "browser-use": "3",
         "command-dispatch": "2",
-        "database-operation": "7",
+        "database-operation": "9",
         "feedback-issue": "9",
-        "moviepilot-api": "31",
+        "moviepilot-api": "32",
         "moviepilot-update": "5",
         "organize-files": "5",
         "transfer-failed-retry": "5",
@@ -151,6 +151,15 @@ def test_core_prompt_requires_read_skill_for_skill_documents() -> None:
     assert "file=<relative path>" in core_prompt
     assert "returns up to 512 KiB of the skill body" in core_prompt
     assert "do not use `read_file` to bypass the limit" in core_prompt
+
+
+def test_core_prompt_preserves_exact_identifiers_from_tool_results() -> None:
+    """核心提示必须阻止模型截断或模式化压缩持久化标识。"""
+    core_prompt = CORE_PROMPT_PATH.read_text(encoding="utf-8")
+
+    assert "Copy persistent IDs, hashes, paths, and other exact identifiers character-for-character" in core_prompt
+    assert "Never shorten, normalize, or abbreviate repeated characters" in core_prompt
+    assert "if the exact value is unavailable, report it as unresolved" in core_prompt
 
 
 def test_api_collection_counts_must_use_gateway_metadata_before_database() -> None:

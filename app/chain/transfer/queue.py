@@ -66,8 +66,8 @@ class TransferQueueOwner(_TransferOwnerBase):
     _WORKER_CLOSE_TIMEOUT_SECONDS = _WORKER_CLOSE_TIMEOUT_SECONDS
 
     def __init__(
-        self,
-        runtime_context: Optional[ChainRuntimeContext] = None,
+            self,
+            runtime_context: Optional[ChainRuntimeContext] = None,
     ) -> None:
         """初始化文件整理处理链。"""
         super().__init__(runtime_context=runtime_context)
@@ -847,8 +847,7 @@ class TransferQueueOwner(_TransferOwnerBase):
                             admission,
                             execution_checkpoint=(
                                 execution_snapshot.checkpoint
-                                if execution_snapshot.state
-                                is TransferExecutionState.SETTLING
+                                if execution_snapshot.state is TransferExecutionState.SETTLING
                                 else None
                             ),
                     ):
@@ -1207,8 +1206,6 @@ class TransferQueueOwner(_TransferOwnerBase):
             self.jobview.remove_task(task.fileitem, finished_only=True)
         return bool(self.jobview.add_task(task))
 
-
-
     def remove_from_queue(self, fileitem: FileItem):
         """
         从待整理队列移除
@@ -1220,7 +1217,6 @@ class TransferQueueOwner(_TransferOwnerBase):
         marker = getattr(self.jobview, "start_execution", None)
         if marker:
             marker(task)
-
 
     def _TransferChain__expire_stale_transfer_tasks(self) -> None:
         """清理外部接管后失去状态心跳的运行中整理任务。"""
@@ -1236,7 +1232,6 @@ class TransferQueueOwner(_TransferOwnerBase):
                 f"整理任务 {fileitem.path} 已连续 {inactive_seconds // 60} 分钟无状态心跳，"
                 "已标记失败并从整理队列视图清理"
             )
-
 
     def _TransferChain__settle_transfer_progress_if_idle(self) -> None:
         """在没有 active 或未结算真实任务时结束进度并重置本批计数。"""
@@ -1415,13 +1410,14 @@ class TransferQueueOwner(_TransferOwnerBase):
                             else 100,
                             text=__process_msg,
                         )
-                except Exception as e:
+                except Exception as error:
                     if terminal_settlement is not None:
                         terminal = True
-                    logger.error(
-                        f"{fileitem.name} 整理任务处理出现错误：{e} - {traceback.format_exc()}"
+                    state, err_msg = self._TransferChain__handle_transfer_execution_error(
+                        task,
+                        error,
+                        preview=bool(task.preview),
                     )
-                    self._TransferChain__fail_transfer_task(task, e)
                     with task_lock:
                         self._processed_num += 1
                         self._fail_num += 1
@@ -1453,8 +1449,6 @@ class TransferQueueOwner(_TransferOwnerBase):
                 continue
             except Exception as e:
                 logger.error(f"整理队列处理出现错误：{e} - {traceback.format_exc()}")
-
-
 
     def get_queue_tasks(self) -> List[TransferJob]:
         """
@@ -1490,12 +1484,12 @@ class TransferQueueOwner(_TransferOwnerBase):
             if torrents_list := self.list_torrents(status=TorrentStatus.TRANSFER):
                 seen = set()
                 existing_hashes = self.jobview.get_all_torrent_hashes()
+                # 排除多下载器返回的重复种子
                 torrents = [
                     torrent
                     for torrent in torrents_list
                     if (h := torrent.hash) not in existing_hashes
-                       # 排除多下载器返回的重复种子
-                       and (h not in seen and (seen.add(h) or True))
+                    and (h not in seen and (seen.add(h) or True))
                 ]
             else:
                 torrents = []
@@ -1521,9 +1515,9 @@ class TransferQueueOwner(_TransferOwnerBase):
                         break
                     if progress_callback:
                         torrent_name = (
-                                getattr(torrent, "title", None)
-                                or getattr(torrent, "name", None)
-                                or torrent.hash
+                            getattr(torrent, "title", None)
+                            or getattr(torrent, "name", None)
+                            or torrent.hash
                         )
                         progress_callback(
                             value=(index - 1) / total_num * 100,

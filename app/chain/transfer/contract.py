@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
     class _TransferOwnerHost:
         """声明 TransferChain 组合后向各 owner 提供的属性和兄弟职责。"""
 
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
         _TransferChain__finish_job_execution: Callable[..., Any]
         _TransferChain__forget_owned_lease: Callable[..., Any]
         _TransferChain__get_transfer_target_dir_path: Callable[..., Any]
+        _TransferChain__handle_transfer_execution_error: Callable[..., Any]
         _TransferChain__handle_planned_transfer: Callable[..., Any]
         _TransferChain__handle_transfer: Callable[..., Any]
         _TransferChain__json_snapshot: Callable[..., Any]

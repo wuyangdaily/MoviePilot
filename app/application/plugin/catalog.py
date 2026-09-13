@@ -379,8 +379,8 @@ class PluginCatalogService:
                     ) \
                     or (
                         plugin.plugin_version == exists.plugin_version
-                        and self._is_local_repo(exists.repo_url)
-                        and not self._is_local_repo(plugin.repo_url)
+                        and not self._is_local_repo(exists.repo_url)
+                        and self._is_local_repo(plugin.repo_url)
                     ):
                 result_by_id[normalized_id] = plugin
         return list(result_by_id.values())
@@ -634,16 +634,16 @@ def _project_update_candidate(
     return cast(
         Plugin,
         plugin.model_copy(
-        update={
-            "update_candidate": PluginUpdateCandidate(
-                source_type=source_type.value,
-                source_key=source_key,
-                repo_url=repo_url,
-                version=plugin.plugin_version,
-                is_bound=bool(
-                    identity and identity.trusted_source_key == source_key
-                ),
-            )
-        },
+            update={
+                "update_candidate": PluginUpdateCandidate(
+                    source_type=source_type.value,
+                    source_key=source_key,
+                    repo_url=repo_url,
+                    version=plugin.plugin_version,
+                    is_bound=bool(
+                        identity and identity.trusted_source_key == source_key
+                    ),
+                )
+            },
         ),
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import io
 import re
@@ -447,31 +448,62 @@ class PluginPackageManager:
         existed: bool,
         label: str,
     ) -> None:
-        """用同级 staging 替换目录，失败时保留替换前的当前目录。"""
+        """用同级 staging 替换目录，并兼容 overlayfs 的跨设备替换。"""
         if existed and not snapshot.is_dir():
             raise FileNotFoundError(f"{label}补偿快照不存在：{snapshot}")
 
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.parent / f".{target.name}.restore-{uuid.uuid4().hex}"
         previous = target.parent / f".{target.name}.previous-{uuid.uuid4().hex}"
+        previous_available = False
+        published = False
         try:
             if existed:
                 shutil.copytree(snapshot, staging)
             if target.exists():
-                target.replace(previous)
+                try:
+                    target.replace(previous)
+                except OSError as error:
+                    if error.errno != errno.EXDEV:
+                        raise
+                    # overlayfs 可能拒绝把镜像层目录直接 rename 到可写层，
+                    # 先复制旧目标保留回滚材料，再删除旧目录继续发布快照。
+                    if target.is_dir():
+                        shutil.copytree(target, previous, symlinks=True)
+                    else:
+                        shutil.copy2(target, previous, follow_symlinks=False)
+                    previous_available = True
+                    PluginPackageManager.__remove_snapshot_path(target)
+                else:
+                    previous_available = True
             if existed:
                 staging.replace(target)
-            if previous.exists():
-                shutil.rmtree(previous)
+            published = True
         except Exception:
-            if not target.exists() and previous.exists():
-                previous.replace(target)
+            if previous_available and not published:
+                try:
+                    PluginPackageManager.__remove_snapshot_path(target)
+                    previous.replace(target)
+                    previous_available = False
+                except Exception as rollback_error:
+                    logger.error(
+                        f"恢复{label}旧目录失败，已保留恢复材料 {previous}: "
+                        f"{rollback_error}"
+                    )
             raise
         finally:
             if staging.exists():
                 shutil.rmtree(staging, ignore_errors=True)
-            if target.exists() and previous.exists():
+            if published and previous.exists():
                 shutil.rmtree(previous, ignore_errors=True)
+
+    @staticmethod
+    def __remove_snapshot_path(path: Path) -> None:
+        """删除待替换的当前路径，保留快照材料供失败回滚。"""
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.exists() or path.is_symlink():
+            path.unlink()
 
     @classmethod
     def stage_persistent_backup(cls, checkpoint: PluginPackageCheckpoint) -> None:
@@ -912,8 +944,8 @@ class PluginPackageManager:
             logger.warning("记录插件原生依赖安装前状态失败：%s", error)
 
     def install_raw(self, pid: str, repo_url: str, package_version: Optional[str] = None,
-                          release_version: Optional[str] = None, force_install: bool = False,
-                          before_dependency_install: Optional[Callable[[], None]] = None) \
+                    release_version: Optional[str] = None, force_install: bool = False,
+                    before_dependency_install: Optional[Callable[[], None]] = None) \
             -> tuple[bool, str]:
         """执行已通过来源准入的同步包安装，不负责身份或运行态提交。"""
         if self.is_local_repo_url(repo_url):
@@ -1002,6 +1034,7 @@ class PluginPackageManager:
                 before_dependency_install,
             )
         # 未声明 release 打包的插件继续使用文件列表方式安装。
+
         def prepare_filelist() -> tuple[bool, str]:
             return self.__prepare_content_via_filelist_sync(
                 pid,
@@ -1156,7 +1189,7 @@ class PluginPackageManager:
             return None, "插件源码目录不存在"
         elif res.status_code != 200:
             return None, f"连接仓库失败：{res.status_code} - " \
-                         f"{'超出速率限制，请设置Github Token或稍后重试' if res.status_code == 403 else res.reason}"
+                f"{'超出速率限制，请设置Github Token或稍后重试' if res.status_code == 403 else res.reason}"
 
         try:
             ret = res.json()
@@ -1384,9 +1417,9 @@ class PluginPackageManager:
         """读取远端插件元数据，并把异常收敛为空映射。"""
         try:
             plugins = (
-                          self.get_plugins(repo_url) if not package_version
-                          else self.get_plugins(repo_url, package_version)
-                      ) or {}
+                self.get_plugins(repo_url) if not package_version
+                else self.get_plugins(repo_url, package_version)
+            ) or {}
             meta = plugins.get(pid)
             return meta if isinstance(meta, dict) else {}
         except Exception as e:
@@ -1625,7 +1658,7 @@ class PluginPackageManager:
             return None, "插件源码目录不存在"
         elif res.status_code != 200:
             return None, f"连接仓库失败：{res.status_code} - " \
-                         f"{'超出速率限制，请设置Github Token或稍后重试' if res.status_code == 403 else res.text}"
+                f"{'超出速率限制，请设置Github Token或稍后重试' if res.status_code == 403 else res.text}"
 
         try:
             ret = res.json()
@@ -1902,6 +1935,7 @@ class PluginPackageManager:
                 before_dependency_install,
             )
         # 未声明 release 打包的插件继续使用文件列表方式安装。
+
         async def prepare_filelist() -> tuple[bool, str]:
             return await self.__prepare_content_via_filelist_async(
                 pid,
@@ -1959,9 +1993,9 @@ class PluginPackageManager:
         """异步读取远端插件元数据，并把异常收敛为空映射。"""
         try:
             plugins = (
-                          await self.async_get_plugins(repo_url) if not package_version
-                          else await self.async_get_plugins(repo_url, package_version)
-                      ) or {}
+                await self.async_get_plugins(repo_url) if not package_version
+                else await self.async_get_plugins(repo_url, package_version)
+            ) or {}
             meta = plugins.get(pid)
             return meta if isinstance(meta, dict) else {}
         except Exception as e:

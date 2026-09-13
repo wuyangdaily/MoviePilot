@@ -41,6 +41,46 @@ MCP 使用系统配置中的 `API_TOKEN` 作为认证密钥，文档中的 API K
 
 MCP 当前不会主动发送工具列表变更通知（`listChanged=false`）。如果客户端缓存了工具列表，插件状态变化后需要让客户端重新请求 `tools/list`；无法手动刷新的客户端应重新连接 MCP 服务或新建会话。
 
+### 插件实例日志等级
+
+`plugin.loglevel.get` 使用源插件 ID 查询，返回该插件全部实例（首项固定是本体自身，其后
+是各个分身）的 `configured_level`、`expires_at` 与 `effective_level`。用某个分身自身的
+实例 ID 当作 `plugin_id` 会被拒绝——分身的日志等级归它的源插件管。`configured_level`
+为 `null` 表示没有覆盖或覆盖已过期；`effective_level` 才是此刻真正用于过滤的等级。
+
+`plugin.loglevel.set` 与 `plugin.loglevel.clear` 使用该总览返回的精确 `instance_id`，
+运行期立即生效，不必重载插件，也不改变全局日志等级。`expires_at` 为空表示覆盖不过期；
+提交不带时区的时间会按 UTC 解读，与查询接口返回的 UTC 时刻保持一致。覆盖过期后自动回落
+全局等级，不需要再调一次 `clear`；重复 `clear` 保持幂等。
+
+覆盖只对宿主受控调用点内产生的日志生效——插件的构造与 `init_plugin`、事件处理器、定时
+服务回调、插件自己声明的 HTTP 端点。插件自建的原生线程不继承这个绑定，其中的日志仍按
+全局等级过滤，不要据此断定覆盖没有写进去。
+
+### 插件实例默认调用目标
+
+`plugin.default_target.set` 与 `plugin.default_target.clear` 使用源插件 ID 加实例 ID
+指定「只给插件 ID、没给实例 ID 的调用应当落到哪个实例」。同一源插件至多一个默认调用
+目标，置新会自动清掉旧的；清除只在当前置位的正是该实例时才动作，重复调用保持幂等。
+
+一个插件有分身而未设置默认调用目标时，未指定实例的调用会直接报错，**不会**随机挑一个、
+也不会按登记顺序取第一个：那会让同一次调用在不同时刻落到不同实例，既无法复现，也无从
+知道刚才是哪个实例执行的。默认目标被停用时同样报错，不静默改走另一个正在运行的实例。
+只有本体、没有任何分身的插件不受这套机制约束，不需要显式设置默认目标。
+
+### 插件实例启停
+
+`plugin.instance.set_enabled` 用实例 ID 启用或停用一个实例，本体与分身共用这一个入口
+（实例 ID 等于插件 ID 时指的是本体自身）。
+
+停用不是删除：业务参数与展示信息原样留在那一行等待再次启用，因而「停掉一个实例」与
+「丢掉它的配置」终于是两件事——此前两者绑死，想保住配置就只能留着一个在跑的实例。
+只有删掉整行才是彻底清理。停用会同时清掉该实例的默认调用目标置位与日志等级覆盖：
+前者会把未指定实例的调用路由到一个不会被实例化的实例，后者本就是带失效时间的临时
+调试设置。
+
+是否启用与此刻是否在运行是两回事：前者是落盘的装载判据，后者由运行时持有、不落盘。
+
 ## 3.1 结构化 Agent 工具与完整参数合同
 
 `tools/list` 会为以下四个正式入口返回可直接校验的 JSON Schema。每个入口都按 operation/action 生成 `oneOf` 分支，分支中包含必填字段、类型、默认值、枚举、嵌套对象和互斥/至少一项等跨字段规则；外部 MCP 客户端可以在一次 `tools/call` 中完成参数构造，不需要猜测 URL、HTTP 方法或第三方 SDK 参数。
@@ -543,14 +583,17 @@ MCP、HTTP 工具管理接口、本地 CLI 和内置 Agent 都从同一严格目
 | `browse_webpage`、`recognize_captcha` | 浏览和验证码等非 MoviePilot 业务 API 能力 |
 | `query_doctor_report` | 只读系统诊断 |
 
-`read_skill`、`read_file`、`write_file`、`edit_file`、`apply_patch`、`execute_command` 和
-`search_web` 不通过 MCP 暴露。隐藏列表只负责收敛接口暴露面，不替代各工具自身的
+`read_skill`、`read_file`、`write_file`、`edit_file`、`apply_patch`、`execute_command`、
+`search_web` 和 `view_image` 不通过 MCP 暴露。隐藏列表只负责收敛接口暴露面，不替代各工具自身的
 权限、路径和网络边界。
 
 `browse_webpage(action="screenshot")` 的外部直调仍返回 JSON 字符串，保留
 `url/title/screenshot_base64/format/note` 并用 `success/execution_outcome` 明确状态。
 内置 Agent 在专用格式化路径把成功截图转换为图像输入，外部 HTTP/MCP 客户端仍按
 原 JSON 合同消费；本次不宣称外部 MCP 已提供原生 image content block。
+
+`view_image` 只供内置 Agent 使用：它会在 Agent 专用格式化路径把 URL、本地图片或图片内容转换为
+原生图像输入，HTTP/MCP 直调不提供该工具，避免把只能由视觉中间件消费的图像块误当作普通 JSON。
 
 内置命令工具 `execute_command(action="run")` 的返回值为 JSON 字符串，包含
 `success`、`execution_outcome`、`status`、`exit_code`、`timed_out`、`timeout`、

@@ -566,6 +566,7 @@ class SubscriptionWritePort(Protocol):
         """在独立异步事务中新增订阅；occurrence_id 标识本次创建事实。"""
         ...
 
+
 class SubscriptionStagingPort(Protocol):
     """复用调用方 Session 且不自行提交的订阅写端口。"""
 
@@ -606,8 +607,9 @@ class SubscriptionStagingPort(Protocol):
         self,
         username: Optional[str],
         state: str,
+        mtype: Optional[str] = None,
     ) -> builtins.list[int]:
-        """异步读取用户或管理员全局范围内可搜索的订阅主键。"""
+        """异步读取用户或管理员指定媒体类型范围内可搜索的订阅主键。"""
         ...
 
     async def stage_delete(self, subscribe_id: int) -> None:

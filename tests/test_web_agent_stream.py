@@ -81,7 +81,12 @@ from app.application.messaging.agent import (
 )
 from app.application.messaging.chat import AgentChatService, configure_agent_chat_service
 from app.application.messaging.skill import skill_interaction_manager
-from app.application.messaging.webagentstream import _build_steering_ack_stream
+from app.application.messaging.webagentstream import (
+    _build_steering_ack_stream,
+    _build_web_agent_output_callback,
+    _build_web_agent_steering_callback,
+    _build_web_agent_tool_event_callback,
+)
 from app.chain.message import MessageChain
 from app.db.oper.agentchat import AgentChatOper
 from app.runtime.events import Event
@@ -156,6 +161,79 @@ async def test_steering_ack_stream_reports_a_queued_message_without_an_assistant
             "content": "补充要求",
         },
         {"type": "done"},
+    ]
+
+
+def test_web_agent_steering_uses_current_assistant_identity_when_segments_are_equal():
+    """展示内容相同的助手段也必须把 steering 插入到当前对象之后。"""
+    assistant_before = {
+        "id": "assistant-same",
+        "role": "assistant",
+        "content": "",
+        "status": "streaming",
+    }
+    assistant_current = dict(assistant_before)
+    display_messages = [assistant_before, assistant_current]
+    published = []
+
+    def build_display_message(*, role, status="done", **_kwargs):
+        """构造最小展示消息，保持测试只验证时间线定位。"""
+        return {"id": f"{role}-{len(published)}", "role": role, "status": status, "content": ""}
+
+    callback = _build_web_agent_steering_callback(
+        display_messages=display_messages,
+        assistant_message_ref={"message": assistant_current},
+        event_publisher=type("Publisher", (), {"publish": published.append})(),
+        build_display_message=build_display_message,
+        build_input_attachments=lambda **_kwargs: [],
+    )
+    message = SteeringMessage.create(session_id="session", user_id="user", text="插入当前段之后")
+
+    callback(message, "applied")
+
+    assert display_messages[0] is assistant_before
+    assert display_messages[1] is assistant_current
+    assert display_messages[1]["status"] == "done"
+    assert display_messages[2]["role"] == "user"
+    assert display_messages[3]["role"] == "assistant"
+    assert published and published[0]["assistant_message_id"] == "assistant-same"
+
+
+def test_web_agent_stream_events_keep_their_assistant_segment_identity():
+    """迟到的文本和工具事件必须携带产生它们的助手段 ID。"""
+    published = []
+    applied = []
+    assistant_message_ref = {"message": {"id": "assistant-before"}}
+
+    output_callback = _build_web_agent_output_callback(
+        assistant_message_ref=assistant_message_ref,
+        event_publisher=type("Publisher", (), {"publish": published.append})(),
+        split_output=lambda delta: [{"type": "delta", "content": delta}],
+        apply_display_event=lambda event, _message: applied.append(event),
+    )
+    tool_event_callback = _build_web_agent_tool_event_callback(
+        assistant_message_ref=assistant_message_ref,
+        event_publisher=type("Publisher", (), {"publish": published.append})(),
+        apply_display_event=lambda event, _message: applied.append(event),
+    )
+
+    output_callback("前段")
+    tool_event_callback({"type": "tool", "tool_id": "tool-before", "status": "running"})
+    assistant_message_ref["message"] = {"id": "assistant-after"}
+    output_callback("后段")
+    tool_event_callback({"type": "tool", "tool_id": "tool-after", "status": "running"})
+
+    assert [event["assistant_message_id"] for event in applied] == [
+        "assistant-before",
+        "assistant-before",
+        "assistant-after",
+        "assistant-after",
+    ]
+    assert [event["assistant_message_id"] for event in published] == [
+        "assistant-before",
+        "assistant-before",
+        "assistant-after",
+        "assistant-after",
     ]
 
 
@@ -1442,6 +1520,7 @@ def test_web_agent_stream_queues_mid_run_input_into_the_same_assistant_stream():
 
     assert '"status": "queued"' in second_body
     assert '"status": "applied"' in first_body
+    assert '"assistant_message_id":' in first_body
     assert first_body.count('data: {"type": "start"') == 1
     assert first_body.count('data: {"type": "done"') == 1
     assert len(instances) == 1

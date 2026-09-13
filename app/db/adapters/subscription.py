@@ -372,7 +372,6 @@ class TransactionalSubscriptionRepository(_TransactionalSubscriptionWriter):
 
         return await self._async_read(operation)
 
-
     async def async_list(
         self,
         state: Optional[str] = None,
@@ -462,6 +461,7 @@ class TransactionalSubscriptionRepository(_TransactionalSubscriptionWriter):
             return [_project_subscription(record) for record in records]
 
         return await self._async_read(operation)
+
 
 class TransactionalSubscriptionHistoryRepository:
     """以独立短 AsyncSession 实现 Agent 等后台入口的订阅历史查询。"""
@@ -786,14 +786,19 @@ class SessionSubscriptionRepository:
         self,
         username: Optional[str],
         state: str,
+        mtype: Optional[str] = None,
     ) -> builtins.list[int]:
-        """异步读取用户或管理员全局范围内指定状态的订阅主键。"""
+        """异步读取用户或管理员指定媒体类型范围内的订阅主键。"""
         snapshots = (
-            await self.async_list_by_username(username, state)
+            await self.async_list_by_username(username, state, mtype=mtype)
             if username is not None
             else await self.async_list(state)
         )
-        return [snapshot.id for snapshot in snapshots]
+        return [
+            snapshot.id
+            for snapshot in snapshots
+            if snapshot.id and (mtype is None or snapshot.type == mtype)
+        ]
 
     async def stage_delete(self, subscribe_id: int) -> None:
         """异步暂存删除订阅。"""

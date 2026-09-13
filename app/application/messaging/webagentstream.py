@@ -89,6 +89,19 @@ def _publish_web_agent_protected_output(
     return bool(event_publisher.publish({"type": "interaction-protected", "content": content}))
 
 
+def _attach_assistant_message_id(
+    event: dict[str, Any],
+    assistant_message_ref: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """为主流展示事件附加产生它的助手消息身份。"""
+    if event.get("assistant_message_id"):
+        return event
+    assistant_message_id = assistant_message_ref["message"].get("id")
+    if not assistant_message_id:
+        return event
+    return {**event, "assistant_message_id": assistant_message_id}
+
+
 def _build_web_agent_steering_callback(
     *,
     display_messages: list[dict[str, Any]],
@@ -117,7 +130,14 @@ def _build_web_agent_steering_callback(
         display_message["steering_message_id"] = message.message_id
         # 应用点是消息流中的真实边界：先收口前一段助手输出，再插入用户消息，
         # 最后创建承接后续工具和文本的新助手气泡。
-        assistant_index = display_messages.index(assistant_message)
+        # 用对象身份定位当前助手段；字典内容可能暂时相同，不能用值相等误选历史段。
+        assistant_index = next(
+            (index for index, item in enumerate(display_messages) if item is assistant_message),
+            -1,
+        )
+        if assistant_index < 0:
+            logger.warning("WebAgent steering 应用时未找到当前助手展示段: %s", message.message_id)
+            return
         display_messages.insert(assistant_index + 1, display_message)
         continuation = build_display_message(role="assistant", status="streaming")
         display_messages.insert(assistant_index + 2, continuation)
@@ -149,8 +169,9 @@ def _build_web_agent_message_callback(
     async def message_callback(message: Message) -> None:
         """接收 Agent 工具主动发送的 Web 通知。"""
         for item in await build_message_events_async(message):
-            apply_display_event(item, assistant_message_ref["message"])
-            event_publisher.publish(item)
+            display_event = _attach_assistant_message_id(item, assistant_message_ref)
+            apply_display_event(display_event, assistant_message_ref["message"])
+            event_publisher.publish(display_event)
 
     return message_callback
 
@@ -167,8 +188,9 @@ def _build_web_agent_output_callback(
     def output_callback(delta: str) -> None:
         """接收 Agent 文本增量并投影为展示事件。"""
         for item in split_output(delta):
-            apply_display_event(item, assistant_message_ref["message"])
-            event_publisher.publish(item)
+            display_event = _attach_assistant_message_id(item, assistant_message_ref)
+            apply_display_event(display_event, assistant_message_ref["message"])
+            event_publisher.publish(display_event)
 
     return output_callback
 
@@ -183,8 +205,9 @@ def _build_web_agent_tool_event_callback(
 
     def tool_event_callback(event: dict[str, Any]) -> None:
         """投影工具开始、完成和失败事件。"""
-        apply_display_event(event, assistant_message_ref["message"])
-        event_publisher.publish(event)
+        display_event = _attach_assistant_message_id(event, assistant_message_ref)
+        apply_display_event(display_event, assistant_message_ref["message"])
+        event_publisher.publish(display_event)
 
     return tool_event_callback
 
@@ -253,14 +276,14 @@ def _build_web_agent_event_generator(
             pass
         except Exception as err:
             logger.error(f"Web智能助手执行失败: {str(err)}")
-            error_event = {
+            error_event = _attach_assistant_message_id({
                 "type": "error",
                 "message": "智能助手执行失败，请稍后重试",
-            }
+            }, assistant_message_ref)
             dependencies.apply_display_event(error_event, assistant_message_ref["message"])
             event_publisher.publish(error_event)
         finally:
-            done_event = {"type": "done"}
+            done_event = _attach_assistant_message_id({"type": "done"}, assistant_message_ref)
             dependencies.apply_display_event(done_event, assistant_message_ref["message"])
             # 终态先进入事件队列，避免展示快照落库延迟前端结束动画。
             event_publisher.publish(done_event)
@@ -283,7 +306,13 @@ def _build_web_agent_event_generator(
         disconnected = False
         terminal_sent = False
         try:
-            yield {"type": "start", "session_id": session_id}
+            yield {
+                "type": "start",
+                "session_id": session_id,
+                # 让前端把本地占位助手段绑定到服务端展示段，后续 steering
+                # 应用事件即可按稳定 ID 定位真实消息边界。
+                "assistant_message_id": assistant_message_ref["message"].get("id"),
+            }
             while not runtime_stop_state.is_system_stopped:
                 if await is_disconnected():
                     disconnected = True

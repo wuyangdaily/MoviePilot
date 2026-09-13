@@ -201,11 +201,11 @@ def test_task_tool_call_reports_streaming_execution():
         )
         request = SimpleNamespace(
             tool=SimpleNamespace(name=SUBAGENT_TASK_TOOL_NAME),
-                tool_call={
-                    "args": {
-                        "description": "检查媒体信息",
-                    }
-                },
+            tool_call={
+                "args": {
+                    "description": "检查媒体信息",
+                }
+            },
         )
 
         async def _fake_handler(_request):
@@ -219,11 +219,11 @@ def test_task_tool_call_reports_streaming_execution():
     assert result == "ok"
     assert calls == [
         {
-                "tool_name": SUBAGENT_TASK_TOOL_NAME,
-                "tool_message": "调用子代理：general-purpose",
-                "tool_kwargs": {
-                    "description": "检查媒体信息",
-                },
+            "tool_name": SUBAGENT_TASK_TOOL_NAME,
+            "tool_message": "调用子代理：general-purpose",
+            "tool_kwargs": {
+                "description": "检查媒体信息",
+            },
         }
     ]
 
@@ -313,12 +313,12 @@ def test_control_tool_call_reports_streaming_execution():
         {
             "tool_name": SUBAGENT_CONTROL_TOOL_NAME,
             "tool_message": "管理子代理任务：action=start",
-                    "tool_kwargs": {
-                        "action": "start",
-                        "tasks": [
+            "tool_kwargs": {
+                "action": "start",
+                "tasks": [
                             {"description": "检查媒体库"},
                             {"description": "检查下载器"},
-                        ],
+                ],
             },
         }
     ]
@@ -381,6 +381,45 @@ def test_control_tool_starts_tasks_concurrently_and_waits():
         ]
         assert "general-purpose:检查媒体库" in wait_payload["tasks"][0]["result"]
         assert "general-purpose:检查下载器" in wait_payload["tasks"][1]["result"]
+
+    asyncio.run(_run_test())
+
+
+def test_control_tool_updates_task_with_same_id_after_bounded_cancel():
+    """update 应取消旧任务、复用 task_id 并把新描述交给子代理。"""
+
+    async def _run_test():
+        model = FakeListChatModel(responses=["ok"])
+        middleware = SubAgentTaskControlMiddleware(
+            model=model,
+            profiles=subagent_module._builtin_subagent_profiles(),
+            tools=[],
+        )
+        calls = []
+        release = asyncio.Event()
+
+        async def _fake_run_task(self, *, description, subagent_type, task_id=None, terminal_sessions=None):
+            calls.append(description)
+            if description == "旧任务":
+                await release.wait()
+            return f"完成:{description}"
+
+        with patch.object(subagent_module._SubAgentAgentProvider, "run_task", new=_fake_run_task):
+            started = json.loads(await middleware._control_task(action="start", description="旧任务"))
+            task_id = started["tasks"][0]["task_id"]
+            await asyncio.sleep(0)
+            updated = json.loads(await middleware._control_task(
+                action="update", task_id=task_id, description="更新后的任务",
+            ))
+            release.set()
+            await middleware._wait_records(
+                records=[middleware._tasks[task_id]], wait_mode="all", timeout_ms=1000,
+            )
+
+        assert updated["success"] is True
+        assert updated["task_id"] == task_id
+        assert updated["tasks"][0]["description"] == "更新后的任务"
+        assert calls == ["旧任务", "更新后的任务"]
 
     asyncio.run(_run_test())
 
@@ -539,6 +578,8 @@ def test_control_tool_pipeline_timeout_is_bounded_when_task_ignores_cancel():
 
         assert payload["success"] is False
         assert "等待超时" in payload["error"]
+        assert payload["execution_outcome"] == "failed"
+        assert "修正任务描述" in payload["recovery"]
         assert payload["tasks"][0]["status"] == "running"
         assert cancelled.is_set()
 
