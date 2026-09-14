@@ -465,6 +465,8 @@ def configure_plugin_services() -> None:
 
     configure_plugin_release_service(
         PluginReleaseService(
+            # 分身的安装清单与 Release 都登记在源插件名下，查询前必须先归一
+            source_plugin_id=plugin_manager.get_plugin_source_id,
             installed_plugins=plugin_manager.get_installed_plugins,
             local_repo_plugins=plugin_manager.get_local_repo_plugins,
             market_plugins=plugin_manager.async_get_plugins_from_market,
@@ -555,6 +557,8 @@ def configure_plugin_services() -> None:
         ),
         executor=command,
         clock=lambda: datetime.now(timezone.utc),
+        # 分身的安装包只登记在源插件名下，勘察来源候选前必须先归一
+        source_plugin_id=plugin_manager.get_plugin_source_id,
     )
     configure_plugin_install_service(gateway)
     configure_plugin_installation_recovery(
@@ -916,13 +920,15 @@ def _plugin_source_id(plugin_manager: PluginManager, plugin_id: str) -> str:
 
 def _local_plugin_sources(plugin_manager: PluginManager) -> set[str]:
     """返回安装清单中存在本地仓候选的物理插件身份。"""
-    installed = {
-        normalize_physical_plugin_id(plugin_id)
-        for plugin_id in (
-            get_configured_system_config().get(SystemConfigKey.UserInstalledPlugins)
-            or []
-        )
-    }
+    installed: set[str] = set()
+    for plugin_id in (
+        get_configured_system_config().get(SystemConfigKey.UserInstalledPlugins)
+        or []
+    ):
+        try:
+            installed.add(normalize_physical_plugin_id(plugin_id))
+        except ValueError as error:
+            logger.warning("跳过无效的已安装插件 ID %s：%s", plugin_id, error)
     candidates: set[str] = set()
     for plugin in plugin_manager.get_local_repo_plugins():
         try:

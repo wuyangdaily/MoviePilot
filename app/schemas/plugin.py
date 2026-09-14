@@ -5,6 +5,7 @@ from typing import Dict, List, Literal, Optional, Union
 
 from pydantic import AfterValidator as _AfterValidator
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator
+from pydantic import BeforeValidator as _BeforeValidator
 from pydantic import PrivateAttr as _PrivateAttr
 from pydantic import computed_field as _computed_field
 
@@ -41,8 +42,15 @@ class PluginUpdateCandidate(BaseModel):  # type: ignore[misc]
     is_bound: bool = Field(description="候选仓库是否为插件当前已绑定仓库")
 
 
-def _validate_plugin_id(value: str) -> str:
-    """限制插件实例标识为可安全用作 Python 类名和路由段的格式。"""
+def validate_plugin_id(value: str) -> str:
+    """限制插件实例标识为可安全用作 Python 类名和路由段的格式。
+
+    公开可调用：凡是把实例 ID 拼进文件系统路径、模块名或路由段的入口都应当先过这道
+    校验，而不是各自另写一套字符白名单——多套规则之间迟早出现缝隙。
+    :param value: 待校验的插件实例 ID
+    :return: 原样返回的合法 ID
+    :raise ValueError: ID 为空、不以字母开头、含字母数字以外的字符或超长
+    """
     if not value or not value[0].isalpha() or not value.isalnum():
         raise ValueError("插件 ID 必须以字母开头且只能包含字母和数字")
     if len(value) > 128:
@@ -50,7 +58,7 @@ def _validate_plugin_id(value: str) -> str:
     return value
 
 
-_PluginId = _Annotated[str, _AfterValidator(_validate_plugin_id)]
+_PluginId = _Annotated[str, _AfterValidator(validate_plugin_id)]
 
 
 class PluginInstance(BaseModel):
@@ -91,6 +99,32 @@ class PluginInstanceEnabledRequest(BaseModel):  # type: ignore[misc]
 
     enabled: bool = Field(
         description="目标启用状态；置假即停用，业务参数与展示信息原样留存等待再次启用"
+    )
+
+
+class PluginInstancePurgeRequest(BaseModel):  # type: ignore[misc]
+    """彻底清理一个插件实例时选定的删除范围。
+
+    各项默认为假：清理不可逆，漏选一项只是少删了东西，多选一项则可能毁掉用户特意
+    保留的数据，因而由调用方逐项明确给出，服务端不替它补默认值。
+    """
+
+    config: bool = Field(default=False, description="是否删除该实例的业务参数")
+    plugin_data: bool = Field(default=False, description="是否删除该实例在插件数据表中的行")
+    own_database: bool = Field(default=False, description="是否销毁该实例的自有数据库")
+    data_directory: bool = Field(
+        default=False,
+        description="是否删除该实例在插件数据目录下的整个目录；选中时自有数据库必然一并销毁",
+    )
+
+
+class PluginInstancePurgeOutcome(BaseModel):  # type: ignore[misc]
+    """彻底清理的执行结果。"""
+
+    purged: List[str] = Field(default_factory=list, description="实际清掉的范围标识")
+    instance_removed: bool = Field(
+        default=False,
+        description="实例行是否随之删除；分身会删，本体保留——它还承载着该插件的展示与启用状态",
     )
 
 
@@ -294,14 +328,32 @@ class PluginInstallOutcome(BaseModel):
     restart_required: bool = Field(description="本次依赖更新是否需要重启 MoviePilot 才能完成")
 
 
+def _blank_clone_suffix_to_none(value: object) -> object:
+    """把「没填后缀」的三种写法归一成同一个值。
+
+    前端的后缀输入框留空时可能整个字段不带、带 null，也可能带一个空串或只有空白；
+    三者表达的都是「由服务端挑一个」。不归一的话空串会撞上格式校验，用户看到的是
+    一条与他的操作对不上的格式错误，而不是自动分配。
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return value
+
+
+_CloneSuffix = _Annotated[Optional[str], _BeforeValidator(_blank_clone_suffix_to_none)]
+
+
 class PluginCloneRequest(BaseModel):
     """创建虚拟插件分身的请求参数。"""
 
-    suffix: str = Field(
-        min_length=1,
+    # 格式与长度在这一层判定：非法后缀拼出的实例 ID 用不了 Python 类名与路由段，
+    # 等落库之后再报错意味着已经写进一行、还要靠回滚把它擦掉
+    suffix: _CloneSuffix = Field(
+        default=None,
         max_length=20,
         pattern=r"^[A-Za-z0-9]+$",
-        description="追加到当前插件 ID 后的 ASCII 字母或数字后缀",
+        description="追加到当前插件 ID 后的 ASCII 字母或数字后缀；留空时由服务端自动分配",
     )
     name: str = Field(default="", description="分身展示名称")
     description: str = Field(default="", description="分身展示描述")
@@ -310,6 +362,34 @@ class PluginCloneRequest(BaseModel):
         default=None,
         description="兼容旧客户端保留，虚拟分身始终跟随源插件版本",
     )
+    restore_previous: bool = Field(
+        default=True,
+        description="该后缀名下留有一个已停用的分身时是否沿用它的业务参数，为假时按源插件模板重建",
+    )
+
+
+class PluginCloneOutcome(BaseModel):  # type: ignore[misc]
+    """一次分身创建或恢复的结果。
+
+    实例 ID 必须回传：后缀可以由服务端自动分配，调用方因此再也算不出它，而后续要
+    拿它去打开配置、刷新列表或跳转。
+    """
+
+    instance_id: str = Field(description="新建或恢复出来的分身实例 ID")
+
+
+class PluginRestorableInstance(BaseModel):  # type: ignore[misc]
+    """一个已停用、其设置仍留存可被恢复的分身实例。
+
+    在册启用的分身不在此列：它们的配置正在被使用，拿来「恢复」没有意义，摆进选择器
+    只会让用户误以为能把一个活着的实例再创建一遍。
+    """
+
+    instance_id: str = Field(description="分身实例 ID")
+    suffix: str = Field(description="该实例相对源插件 ID 的后缀")
+    plugin_name: Optional[str] = Field(default=None, description="停用前登记的展示名称")
+    plugin_desc: Optional[str] = Field(default=None, description="停用前登记的展示描述")
+    has_config: bool = Field(default=False, description="是否留有业务参数")
 
 
 class PluginSourceIdentity(BaseModel):  # type: ignore[misc]

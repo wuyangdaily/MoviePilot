@@ -182,11 +182,24 @@ def build_plugin_runtime(
         loadable_plugins: list[str],
         validator: Callable[[Any], bool],
     ) -> list[Any]:
-        """加载物理插件或虚拟实例，并保持持久化实例顺序。"""
+        """加载物理插件或虚拟实例，并保持持久化实例顺序。
+
+        带具体实例 ID 的定向装载同样认启用位。实例存储的读取口刻意返回全部在册行
+        （含停用的），加载器在收到具体插件 ID 时也只按这个 ID 找目录、不看可装载
+        清单；两处叠在一起，源码变更触发的实例树重载、按 ID 发起的重载就会绕过启用
+        判据，把用户停用的实例又拉起来跑到下次重启。
+        """
         if plugin_id:
             instance = instances.get(plugin_id)
             if instance:
+                if not instance.is_enabled:
+                    return []
                 return loader.load_instance(instance, validator)
+            if not any(
+                loadable.casefold() == plugin_id.casefold()
+                for loadable in loadable_plugins
+            ):
+                return []
             return loader.load(plugin_id, loadable_plugins, validator)
         plugins = loader.load(None, loadable_plugins, validator)
         # 只装载启用的配置：停用的分身仍登记在册、卡片可见，但不该被实例化
@@ -317,12 +330,73 @@ def build_plugin_runtime(
         instance = instances.get(plugin_id)
         return instance.source_plugin_id if instance else plugin_id
 
+    def plugin_registered(plugin_id: str) -> bool:
+        """判断插件是否在册：装过（安装清单里有）或留有持久化的实例行。
+
+        默认调用目标与实例日志等级这两个管理接口问的都是「这个插件还在不在册、能不能
+        被管理」，因此共用这一个判据，而不能绑在运行期类注册表上：启动只把启用中的
+        本体与分身装进注册表，某插件的全部实例停用后重启，注册表里就没有它的类了，
+        但它的安装记录与实例行都还在。绑在注册表上等于说「停用即不存在」，而停用不是
+        卸载——在册的实例必须仍然可见、可管理，否则用户再也无法把它重新指回默认调用
+        目标，也调不出它的日志等级设置，而那份设置正是排查它为什么被停用时要看的。
+
+        「当前是否装载」是另一个问题，由各自的端口回答：插件配置读写看类注册表，
+        分身建号与安装前置看包在不在磁盘上，都不走这里。
+
+        :param plugin_id: 插件 ID
+        :return: 该插件是否在册
+        """
+        if instances.get_host(plugin_id) is not None:
+            return True
+        if instances.for_source(plugin_id):
+            return True
+        installed = environment.storage().read(
+            SystemConfigKey.UserInstalledPlugins
+        ) or []
+        return plugin_id in installed
+
+    def instance_id_taken(instance_id: str) -> bool:
+        """判断一个候选实例 ID 是否已被占用。
+
+        创建分身的判存与自动分配后缀共用这一个判据，自动分配因此不可能挑中一个手填
+        时会被拒绝的 ID。四条依据各自覆盖一类占用者，缺一条就会让新分身顶掉一个真实
+        存在的插件身份：
+
+        * 类注册表——当前已装载的本体与分身；
+        * 实例行——含已停用的分身与本体，它们的配置还留在行上，不是空位；
+        * 安装清单——装过但此刻未装载的物理插件；
+        * 插件包目录——卸载不删源码，磁盘上因此会留下不在前三者里的插件包，占了它的
+          号会让那个插件以后再也装不回来（实例行的归属列对不上，写入直接被拒）。
+
+        判存不能只看运行态：源插件本次加载失败时，已有的同名分身会被判成「不存在」
+        而放行，随后它的描述符被覆盖，再在回滚里连同配置一起删掉。``catalog.exists``
+        不足以充当磁盘判据——它要从**运行中**的实例上取版本号，未装载的插件包一律
+        报告不存在，因而这里直接看包目录。
+
+        :param instance_id: 候选实例 ID
+        :return: 该 ID 是否已被占用
+        """
+        if registry.plugin_class(instance_id) is not None:
+            return True
+        if instances.get(instance_id) is not None:
+            return True
+        if instances.get_host(instance_id) is not None:
+            return True
+        installed = environment.storage().read(
+            SystemConfigKey.UserInstalledPlugins
+        ) or []
+        if instance_id in installed:
+            return True
+        return (environment.plugins_root / instance_id.lower()).is_dir()
+
     clone = PluginCloneService(
         plugin_class=registry.plugin_class,
-        plugin_exists=catalog.exists,
+        instance_id_taken=instance_id_taken,
+        get_instance=instances.get,
         source_plugin_id=source_plugin_id,
         save_instance=instances.save,
         delete_instance=instances.delete,
+        disable_instance=instances.disable,
         read_config=configs.read,
         save_config=lambda plugin_id, config: configs.write(
             plugin_id,
@@ -335,14 +409,14 @@ def build_plugin_runtime(
         log=environment.logger,
     )
     log_level = PluginLogLevelControl(
-        plugin_exists=lambda plugin_id: registry.plugin_class(plugin_id) is not None,
+        plugin_exists=plugin_registered,
         get_instance=instances.get,
         instances_for_source=instances.for_source,
         read_log_level=configs.read_log_level,
         write_log_level=configs.write_log_level,
     )
     default_target = PluginDefaultTargetControl(
-        plugin_exists=lambda plugin_id: registry.plugin_class(plugin_id) is not None,
+        plugin_exists=plugin_registered,
         get_instance=instances.get,
         instances_for_source=instances.for_source,
         get_host_instance=instances.get_host,

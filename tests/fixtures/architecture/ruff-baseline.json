@@ -459,9 +459,6 @@
   "app/runtime/extensions/plugin/loader.py": {
     "I001": 1
   },
-  "app/runtime/extensions/plugin/storage.py": {
-    "I001": 1
-  },
   "app/runtime/gc.py": {
     "I001": 1
   },
@@ -743,9 +740,6 @@
     "I001": 1
   },
   "tests/test_metainfo.py": {
-    "I001": 1
-  },
-  "tests/test_metamusic.py": {
     "I001": 1
   },
   "tests/test_module_quality.py": {

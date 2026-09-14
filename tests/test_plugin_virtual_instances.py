@@ -1,19 +1,27 @@
 """虚拟插件实例的持久化、加载和创建行为测试。"""
 
+import importlib.util
 import sys
+import threading
+from contextlib import nullcontext
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
+import app.application.plugin.management as plugin_management
+from app.runtime.event.registry import EventRegistry
 from app.runtime.extensions.plugin.clone import PluginCloneService
 from app.runtime.extensions.plugin.loader import PluginLoader
+from app.runtime.extensions.plugin.manager import PluginManager
 from app.runtime.extensions.plugin.storage import (
     PluginInstanceDirectory,
     PluginInstanceStore,
     PluginStorage,
 )
 from app.schemas.plugin import PluginInstance, PluginRuntimeStatus
-from app.schemas.types import SystemConfigKey
+from app.schemas.types import EventType, SystemConfigKey
 
 
 def _make_directory() -> tuple[PluginInstanceDirectory, dict[str, PluginInstance]]:
@@ -297,6 +305,142 @@ def test_merging_legacy_entries_is_idempotent_across_restarts():
     assert written == [SystemConfigKey.PluginInstancesImported]
 
 
+def test_entries_deleted_by_an_older_version_are_removed_from_the_table():
+    """回滚到旧版本删掉的分身，切回新版本后必须从独立表里一并消失。
+
+    旧键是旧版本唯一认得的清单，保留它作回滚依据就等于承诺「在那边做的改动切回来
+    还算数」。只合并新增与改写、不同步删除，用户在旧版本里删掉的分身会在新版本里
+    继续出现并继续被装载。
+    """
+    values = _legacy_values(
+        DemoPluginWork={
+            "instance_id": "DemoPluginWork",
+            "source_plugin_id": "DemoPlugin",
+        },
+        DemoPluginHome={
+            "instance_id": "DemoPluginHome",
+            "source_plugin_id": "DemoPlugin",
+        },
+    )
+    storage, _written = _make_storage(values)
+    directory, records = _make_directory()
+
+    first = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+    assert set(first.all()) == {"DemoPluginWork", "DemoPluginHome"}
+
+    # 回滚到旧版本：旧版本只认旧键，用户在那里删掉了一个分身
+    del values[SystemConfigKey.PluginInstances]["DemoPluginHome"]
+
+    second = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+
+    assert set(second.all()) == {"DemoPluginWork"}
+    assert set(records) == {"DemoPluginWork"}
+    assert set(values[SystemConfigKey.PluginInstancesImported]) == {"DemoPluginWork"}
+
+
+def test_renaming_in_the_legacy_key_does_not_leave_the_old_row_behind():
+    """旧版本里的重命名表现为「旧 ID 消失 + 新 ID 出现」，旧行不得残留。"""
+    values = _legacy_values(
+        DemoPluginWork={
+            "instance_id": "DemoPluginWork",
+            "source_plugin_id": "DemoPlugin",
+            "plugin_name": "工作实例",
+        }
+    )
+    storage, _written = _make_storage(values)
+    directory, records = _make_directory()
+
+    first = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+    assert set(first.all()) == {"DemoPluginWork"}
+
+    values[SystemConfigKey.PluginInstances] = {
+        "DemoPluginHome": {
+            "instance_id": "DemoPluginHome",
+            "source_plugin_id": "DemoPlugin",
+            "plugin_name": "工作实例",
+        }
+    }
+
+    second = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+
+    assert set(second.all()) == {"DemoPluginHome"}
+    assert set(records) == {"DemoPluginHome"}
+
+
+def test_rows_created_natively_in_the_new_table_survive_legacy_deletions():
+    """新表里原生创建、从未由旧键导入过的分身不受旧键删除牵连。
+
+    删除判据必须是「曾经认领过指纹、现在旧键里没有了」；若退化成「旧键里没有就删」，
+    新版本创建的分身会在下一次启动时被旧键当成「已删除」整批清掉。
+    """
+    values = _legacy_values(
+        DemoPluginWork={
+            "instance_id": "DemoPluginWork",
+            "source_plugin_id": "DemoPlugin",
+        }
+    )
+    storage, _written = _make_storage(values)
+    directory, records = _make_directory()
+
+    first = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+    first.save(
+        PluginInstance(
+            instance_id="DemoPluginNative",
+            source_plugin_id="DemoPlugin",
+        )
+    )
+    assert set(first.all()) == {"DemoPluginWork", "DemoPluginNative"}
+
+    # 旧版本删掉它自己那条，原生创建的那条与旧键无关
+    del values[SystemConfigKey.PluginInstances]["DemoPluginWork"]
+
+    second = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+
+    assert set(second.all()) == {"DemoPluginNative"}
+    assert set(records) == {"DemoPluginNative"}
+
+
+def test_bootstrap_is_retried_after_a_transient_persistence_failure():
+    """引导过程中的暂时性故障不得让同一进程此后永久跳过引导。
+
+    完成标记若在读取、合并、写指纹之前就落下，首次访问撞上一次数据库抖动之后，
+    本进程剩余生命周期里读到的都是一份没导完的分身清单，只能靠重启自愈。
+    """
+    values = _legacy_values(
+        DemoPluginWork={
+            "instance_id": "DemoPluginWork",
+            "source_plugin_id": "DemoPlugin",
+        }
+    )
+    directory, _records = _make_directory()
+    reads: list = []
+    failures = {"remaining": 1}
+
+    def _read(key):
+        """第一次读旧键时模拟一次持久化层抖动。"""
+        reads.append(key)
+        if key is SystemConfigKey.PluginInstances and failures["remaining"]:
+            failures["remaining"] -= 1
+            raise RuntimeError("持久化层暂时不可用")
+        return values.get(key)
+
+    storage = PluginStorage(
+        read=_read,
+        write=lambda key, value: values.__setitem__(key, value),
+    )
+    store = PluginInstanceStore(storage=lambda: storage, directory=lambda: directory)
+
+    with pytest.raises(RuntimeError):
+        store.all()
+
+    assert set(store.all()) == {"DemoPluginWork"}
+
+    # 成功之后仍然是一次性的：后续读取不再回头查旧键
+    reads_after_success = len(reads)
+    assert set(store.all()) == {"DemoPluginWork"}
+    assert len(reads) == reads_after_success
+
+
 def test_loader_executes_each_instance_in_an_isolated_module_namespace(
     tmp_path,
     monkeypatch,
@@ -367,6 +511,114 @@ def test_loader_executes_each_instance_in_an_isolated_module_namespace(
     assert plugin_package.demoplugin is source_module
 
 
+def _import_host_package(module_name: str, source_dir: Path) -> ModuleType:
+    """按源插件本体的模块名导入磁盘源码，复刻本体已被装载的运行事实。
+
+    本体必须真的在 ``sys.modules`` 里：处理器的注册键要靠函数的 ``__module__``
+    反查模块对象才能算出来，本体缺席会让两边都算成同一个占位名，掩盖分身与本体
+    撞键这件事本身。
+    """
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        source_dir / "__init__.py",
+        submodule_search_locations=[str(source_dir)],
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _forget_modules(*prefixes: str) -> None:
+    """清除用例在模块缓存里留下的插件模块，避免污染后续用例。"""
+    for name in list(sys.modules):
+        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
+            sys.modules.pop(name, None)
+
+
+def test_loader_gives_submodule_handlers_of_each_instance_distinct_registry_keys(
+    tmp_path,
+    monkeypatch,
+):
+    """分身在子模块类体内声明的处理器，注册键必须与本体的区分开。
+
+    事件处理器的注册键取自函数所在模块名。类体内的函数是类的属性而不是模块的
+    属性，只遍历模块顶层碰不到它们；漏改会让分身与本体注册到同一个键上，后注册
+    的顶掉先注册的：分身收不到事件，停掉本体会把分身一起停掉。
+    """
+    source_dir = tmp_path / "identityplugin"
+    source_dir.mkdir()
+    (source_dir / "core.py").write_text(
+        "class IdentityHandlers:\n"
+        "    def on_event(self, event):\n"
+        "        return event\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def on_static_event(event):\n"
+        "        return event\n",
+        encoding="utf-8",
+    )
+    (source_dir / "__init__.py").write_text(
+        "from app.plugins.identityplugin.core import IdentityHandlers\n"
+        "\n"
+        "\n"
+        "class IdentityPlugin(IdentityHandlers):\n"
+        "    plugin_name = 'Identity'\n"
+        "\n"
+        "    def init_plugin(self, _config):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    import app.plugins as plugin_package
+
+    loader = PluginLoader(
+        plugins_root=tmp_path,
+        import_preparer=lambda **_kwargs: None,
+        import_scanner=lambda **_kwargs: None,
+        log=_logger(),
+    )
+    try:
+        host_module = _import_host_package("app.plugins.identityplugin", source_dir)
+        monkeypatch.setattr(
+            plugin_package, "identityplugin", host_module, raising=False
+        )
+        clone_class = loader.load_instance(
+            PluginInstance(
+                instance_id="IdentityPluginWork",
+                source_plugin_id="IdentityPlugin",
+            ),
+            lambda candidate: hasattr(candidate, "init_plugin"),
+        )[0]
+        host_handler = host_module.IdentityPlugin.on_event
+        clone_handler = clone_class.on_event
+        subscribers: dict = {}
+        registry = EventRegistry(
+            lock=threading.RLock(),
+            broadcast_subscribers=lambda: subscribers,
+            chain_subscribers=dict,
+            disabled_handlers=set,
+            disabled_classes=set,
+        )
+        registry.add(EventType.PluginAction, host_handler, 0)
+        registry.add(EventType.PluginAction, clone_handler, 0)
+
+        assert len(subscribers[EventType.PluginAction]) == 2
+        assert EventRegistry.handler_identifier(host_handler) == (
+            "app.plugins.identityplugin.core.IdentityHandlers.on_event"
+        )
+        assert EventRegistry.handler_identifier(clone_handler) == (
+            "app.plugins.identitypluginwork.core.IdentityHandlers.on_event"
+        )
+        assert EventRegistry.handler_identifier(clone_class.on_static_event) == (
+            "app.plugins.identitypluginwork.core.IdentityHandlers.on_static_event"
+        )
+    finally:
+        _forget_modules(
+            "app.plugins.identityplugin",
+            "app.plugins.identitypluginwork",
+        )
+
+
 def test_loader_runtime_gate_only_rejects_explicit_incompatible_declarations(
     tmp_path,
     monkeypatch,
@@ -408,13 +660,15 @@ def test_clone_service_persists_descriptor_without_copying_source_package():
 
     service = PluginCloneService(
         plugin_class=lambda plugin_id: DemoPlugin if plugin_id == "DemoPlugin" else None,
-        plugin_exists=lambda plugin_id: plugin_id in instances,
+        instance_id_taken=lambda plugin_id: plugin_id in instances,
+        get_instance=instances.get,
         source_plugin_id=lambda plugin_id: plugin_id,
         save_instance=lambda instance: instances.__setitem__(
             instance.instance_id,
             instance,
         ),
         delete_instance=lambda plugin_id: instances.pop(plugin_id, None) is not None,
+        disable_instance=lambda plugin_id: plugin_id in instances,
         read_config=lambda plugin_id: configs.get(plugin_id, {}),
         save_config=lambda plugin_id, config: not configs.__setitem__(plugin_id, config),
         delete_config=lambda plugin_id: configs.pop(plugin_id, None) is not None,
@@ -456,13 +710,15 @@ def test_clone_service_rolls_back_descriptor_and_config_after_load_failure():
 
     service = PluginCloneService(
         plugin_class=lambda _plugin_id: DemoPlugin,
-        plugin_exists=lambda plugin_id: plugin_id in instances,
+        instance_id_taken=lambda plugin_id: plugin_id in instances,
+        get_instance=instances.get,
         source_plugin_id=lambda plugin_id: plugin_id,
         save_instance=lambda instance: instances.__setitem__(
             instance.instance_id,
             instance,
         ),
         delete_instance=lambda plugin_id: instances.pop(plugin_id, None) is not None,
+        disable_instance=lambda plugin_id: plugin_id in instances,
         read_config=lambda plugin_id: configs.get(plugin_id, {}),
         save_config=lambda plugin_id, config: not configs.__setitem__(plugin_id, config),
         delete_config=lambda plugin_id: configs.pop(plugin_id, None) is not None,
@@ -483,3 +739,80 @@ def test_clone_service_rolls_back_descriptor_and_config_after_load_failure():
     assert instances == {}
     assert configs == {"DemoPlugin": {"enabled": True}}
     assert removed == ["DemoPluginbroken"]
+
+
+def _tree_manager(reloaded: list[str]) -> MagicMock:
+    """构造带一个分身的插件管理器替身，重载树语义取自真实实现。
+
+    只替换重载动作本身，实例树的解析仍走 PluginManager 的真实方法，避免用例把
+    「分身也被重载」断言在一个自己编造的树上。
+    """
+    directory, records = _make_directory()
+    records["DemoPluginwork"] = PluginInstance(
+        instance_id="DemoPluginwork",
+        source_plugin_id="DemoPlugin",
+        plugin_name="工作实例",
+    )
+    storage, _written = _make_storage({})
+    manager = MagicMock()
+    manager._plugin_instance_store = PluginInstanceStore(
+        storage=lambda: storage,
+        directory=lambda: directory,
+    )
+    manager._plugin_quiesce_lock = threading.RLock()
+    manager.mutation.side_effect = lambda _operation: nullcontext()
+    manager.reload_plugin.side_effect = lambda plugin_id: (
+        reloaded.append(plugin_id) or PluginRuntimeStatus.ACTIVE
+    )
+    manager.get_plugin_source_id.side_effect = lambda plugin_id: (
+        PluginManager.get_plugin_source_id(manager, plugin_id)
+    )
+    manager.reload_plugin_tree.side_effect = lambda plugin_id: (
+        PluginManager.reload_plugin_tree(manager, plugin_id)
+    )
+    manager.get_plugin_reload_targets.side_effect = lambda plugin_id: (
+        PluginManager.get_plugin_reload_targets(manager, plugin_id)
+    )
+    return manager
+
+
+def test_manual_reload_covers_source_plugin_and_its_clones(monkeypatch):
+    """手工重载本体要连分身一起换掉旧类对象，并逐个刷新它们的注册。
+
+    只重载本体时，分身继续持有旧模块与旧类对象，改完源码点重载后新旧代码会在同一
+    进程内并存，分身的 API、调度与命令注册也不会刷新。
+    """
+    reloaded: list[str] = []
+    refreshed: list[str] = []
+    manager = _tree_manager(reloaded)
+    monkeypatch.setattr(plugin_management, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_management,
+        "refresh_plugin_registrations",
+        refreshed.append,
+    )
+
+    status = plugin_management.reload_plugin_runtime("DemoPlugin")
+
+    assert status is PluginRuntimeStatus.ACTIVE
+    assert reloaded == ["DemoPlugin", "DemoPluginwork"]
+    assert refreshed == ["DemoPlugin", "DemoPluginwork"]
+
+
+def test_manual_reload_of_a_clone_rebuilds_the_whole_instance_tree(monkeypatch):
+    """从分身发起的重载要回到源码本体，再带上同源的全部分身。"""
+    reloaded: list[str] = []
+    refreshed: list[str] = []
+    manager = _tree_manager(reloaded)
+    monkeypatch.setattr(plugin_management, "get_plugin_manager", lambda: manager)
+    monkeypatch.setattr(
+        plugin_management,
+        "refresh_plugin_registrations",
+        refreshed.append,
+    )
+
+    status = plugin_management.reload_plugin_runtime("DemoPluginwork")
+
+    assert status is PluginRuntimeStatus.ACTIVE
+    assert reloaded == ["DemoPlugin", "DemoPluginwork"]
+    assert refreshed == ["DemoPlugin", "DemoPluginwork"]
