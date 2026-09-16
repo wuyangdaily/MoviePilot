@@ -225,12 +225,12 @@ class ConfigModel(BaseModel):
     AUTH_SITE: str = ""
 
     # ==================== 数据库配置 ====================
-    # 数据库类型，支持 sqlite 和 postgresql，默认使用 sqlite
     # API 服务的 worker 进程数。连接池是进程级的，每个 worker 各持一份，
     # 数据库连接额度校验按它换算总用量。注意：当前主程序以单进程方式启动
     # （uvicorn.Config 的 workers 仅在多进程 supervisor 路径下生效），
     # 调大此项前需先解决调度器会在每个 worker 内重复执行的问题
     API_WORKERS: int = Field(default=1, ge=1)
+    # 数据库类型，支持 sqlite 和 postgresql，默认使用 sqlite
     DB_TYPE: str = "sqlite"
     # 是否在控制台输出 SQL 语句，默认关闭
     DB_ECHO: bool = False
@@ -391,6 +391,14 @@ class ConfigModel(BaseModel):
     # TMDB API Key
     TMDB_API_KEY: str = "db55323b8d3e4154498498a75642b381"
 
+    # ==================== Bangumi配置 ====================
+    # 是否启用 Bangumi 数据与图片代理
+    BANGUMI_PROXY_ENABLE: bool = False
+    # Bangumi API代理地址，留空使用官方地址
+    BANGUMI_API_DOMAIN: str = ""
+    # Bangumi图片代理地址，留空时由后端代理端点直接拉取原始图片
+    BANGUMI_IMAGE_DOMAIN: str = ""
+
     # ==================== 音乐配置 ====================
     # 音乐封面代理地址（用于解决 coverartarchive.org 无法访问导致的封面不显示问题，留空则使用官方地址）
     MUSIC_COVER_PROXY: str = ""
@@ -416,6 +424,7 @@ class ConfigModel(BaseModel):
     # ==================== TVDB配置 ====================
     # TVDB API Key
     TVDB_V4_API_KEY: str = "ed2aa66b-7899-4677-92a7-67bc9ce3d93a"
+    # TVDB V4 订阅 PIN
     TVDB_V4_API_PIN: str = ""
 
     # ==================== Fanart配置 ====================
@@ -750,6 +759,9 @@ class ConfigModel(BaseModel):
             "bing.com",
             "doubanio.com",
             "lain.bgm.tv",
+            "bgm.tv",
+            "bangumi.tv",
+            "bangumi.lol",
             "raw.githubusercontent.com",
             "github.com",
             "thetvdb.com",

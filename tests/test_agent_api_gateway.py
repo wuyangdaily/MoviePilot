@@ -31,11 +31,11 @@ from app.agent.tools.manager import MoviePilotToolsManager
 def test_api_operation_registry_matches_migration_batches() -> None:
     """API 操作注册表必须覆盖各迁移批次且每项具有固定路由。"""
     assert len(API_FIRST_BATCH_OPERATION_SPECS) == 53
-    assert len(API_PARITY_OPERATION_SPECS) == 15
+    assert len(API_PARITY_OPERATION_SPECS) == 17
     assert len(API_MUSIC_OPERATION_SPECS) == 10
     assert len(API_SYSTEM_OPERATION_SPECS) == 7
     assert len(API_EXTENDED_OPERATION_SPECS) == 144
-    assert len(API_OPERATION_SPECS) == 229
+    assert len(API_OPERATION_SPECS) == 231
     assert {spec.operation_id for spec in API_OPERATION_SPECS} == set(API_OPERATION_ROUTES)
     assert {
         "download.list",
@@ -192,6 +192,16 @@ def test_mcp_tools_list_preserves_all_moviepilot_api_operation_branches() -> Non
 
     assert definition.name == "moviepilot_api"
     assert operation_ids == set(API_OPERATION_ROUTES)
+
+
+def test_local_agent_tool_uses_the_same_precise_operation_schema() -> None:
+    """本地 Agent 绑定的工具 schema 至少必须提示 body 是 JSON 结构值。"""
+    tool = MoviePilotApiTool(session_id="session", user_id="api_user")
+    schema = tool.tool_call_schema
+    assert not isinstance(schema, dict)
+    body = schema.model_json_schema()["properties"]["body"]
+
+    assert body["$ref"].endswith("/JsonData")
 
 
 def test_mcp_collection_contract_distinguishes_exact_and_unavailable_totals() -> None:

@@ -853,6 +853,28 @@ class SystemUpdateManager(metaclass=SingletonClass):
                 follow_symlinks=False,
             )
 
+    def _copy_plugin_runtime_payload(self, source: Path, destination: Path) -> None:
+        """
+        迁移插件运行时内容，但保留新版宿主的包根入口。
+
+        ``app/plugins/__init__.py`` 属于后端源码提供的兼容入口，不属于持久化插件；
+        旧版本该文件包含宿主实现，随插件目录迁移会遮蔽新版 SDK 的兼容符号。
+        """
+        destination.mkdir(parents=True, exist_ok=True)
+        for destination_path in destination.iterdir():
+            if destination_path.name != "__init__.py":
+                self._remove_path(destination_path)
+
+        for source_path in source.iterdir():
+            if source_path.name == "__init__.py":
+                continue
+            destination_path = destination / source_path.name
+            if source_path.is_dir() and not source_path.is_symlink():
+                shutil.copytree(source_path, destination_path, symlinks=True)
+            else:
+                shutil.copy2(source_path, destination_path, follow_symlinks=False)
+            self._preserve_tree_ownership(source_path, destination_path)
+
     @staticmethod
     def _clear_staged_native_resources(resource_dir: Path) -> None:
         """清除暂存目录中的旧平台原生站点资源。"""
@@ -878,6 +900,28 @@ class SystemUpdateManager(metaclass=SingletonClass):
                 resource_dir = legacy_dir
         return resource_dir
 
+    @staticmethod
+    def _is_site_runtime_resource(path: Path) -> bool:
+        """判断文件是否属于需要跨 Docker 应用升级继承的站点运行时资源。"""
+        return path.is_file() and (
+            (path.name.startswith("user.sites.") and path.suffix == ".bin")
+            or (
+                path.name.startswith("sites.")
+                and path.suffix in {".so", ".pyd", ".dylib"}
+            )
+        )
+
+    def _copy_site_runtime_resources(
+        self, source_dir: Path, destination_dir: Path
+    ) -> None:
+        """只把旧版本的站点索引和原生资源叠加到新版源码目录。"""
+        if not source_dir.is_dir():
+            return
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        for path in source_dir.iterdir():
+            if self._is_site_runtime_resource(path):
+                shutil.copy2(path, destination_dir / path.name)
+
     def _copy_prepared_resources(
         self, prepared: dict[str, Any], resource_dir: Path
     ) -> None:
@@ -896,7 +940,12 @@ class SystemUpdateManager(metaclass=SingletonClass):
         *,
         include_resources: bool,
     ) -> tuple[Path, Path]:
-        """解压并组装待切换的 Docker 后端、前端和插件资源载荷。"""
+        """
+        解压并组装待切换的 Docker 后端、前端和插件资源载荷。
+
+        新版本归档是 Python 源码的唯一来源，旧版本目录只迁移插件和站点运行时内容，
+        不覆盖新版的插件包根兼容入口或新增应用模块。
+        """
         backend_extract = temporary_root / "backend"
         frontend_extract = temporary_root / "frontend"
         backend_extract.mkdir()
@@ -915,24 +964,19 @@ class SystemUpdateManager(metaclass=SingletonClass):
         current_app = self._docker_app_dir
         current_plugins = current_app / "app" / "plugins"
         stage_plugins = stage_app / "app" / "plugins"
-        if stage_plugins.exists() or stage_plugins.is_symlink():
+        if stage_plugins.is_symlink():
             self._remove_path(stage_plugins)
+        if stage_plugins.exists() and not stage_plugins.is_dir():
+            raise RuntimeError("插件运行目录不是目录")
+        stage_plugins.mkdir(parents=True, exist_ok=True)
         if current_plugins.is_dir():
-            shutil.copytree(current_plugins, stage_plugins, symlinks=True)
-            self._preserve_tree_ownership(current_plugins, stage_plugins)
-        else:
-            stage_plugins.mkdir(parents=True, exist_ok=True)
+            self._copy_plugin_runtime_payload(current_plugins, stage_plugins)
         if not (stage_plugins / "__init__.py").is_file():
             raise RuntimeError("插件运行目录缺少 app.plugins 兼容入口")
 
         stage_resources = stage_app / "app" / "application" / "site"
-        if stage_resources.exists() or stage_resources.is_symlink():
-            self._remove_path(stage_resources)
         current_resources = self._resource_source_dir(current_app)
-        if current_resources.is_dir():
-            shutil.copytree(current_resources, stage_resources, symlinks=True)
-        else:
-            stage_resources.mkdir(parents=True, exist_ok=True)
+        self._copy_site_runtime_resources(current_resources, stage_resources)
         if include_resources:
             self._copy_prepared_resources(prepared, stage_resources)
         return stage_app, stage_public
@@ -1348,20 +1392,27 @@ class SystemUpdateManager(metaclass=SingletonClass):
                 raise RuntimeError(f"站点资源文件校验失败：{item.get('name')}")
 
     def _request(self) -> RequestUtils:
-        """创建访问 GitHub Release 的请求客户端。"""
+        """创建访问 GitHub Release API 的认证请求客户端。"""
         return RequestUtils(
             proxies=get_runtime_setting("PROXY"),
             headers=get_runtime_setting("GITHUB_HEADERS"),
             timeout=60,
         )
 
+    def _download_request(self) -> RequestUtils:
+        """创建公开 GitHub 归档下载客户端，避免认证头传递到 codeload。"""
+        return RequestUtils(
+            proxies=get_runtime_setting("PROXY"),
+            timeout=60,
+        )
+
     def _download_file(
         self, url: str, destination: Path, downloaded_before: int, total_hint: int
     ) -> tuple[int, int]:
-        """流式下载文件并把进度写入当前升级类型。"""
+        """使用公开下载客户端流式下载文件并把进度写入当前升级类型。"""
         temporary = destination.with_suffix(".part")
         temporary.unlink(missing_ok=True)
-        with self._request().get_stream(url) as response:
+        with self._download_request().get_stream(url) as response:
             if response is None or response.status_code != 200:
                 raise RuntimeError(
                     f"下载更新包失败：HTTP {getattr(response, 'status_code', '无响应')}"
