@@ -1084,8 +1084,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 8881,
-  "edge_sha256": "700858f0eb08a886c206c9be9685964b01f0e3412bed7b1c1fa84fa343231a14",
+  "edge_count": 8884,
+  "edge_sha256": "c5bb4a5912d06f6e8e6a5545d78d5e043a2994f5cf85235a87397e66bb29e0ef",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -3040,6 +3040,7 @@
     "app.api.endpoints.system -> app.application.configuration",
     "app.api.endpoints.system -> app.application.database",
     "app.api.endpoints.system -> app.application.image",
+    "app.api.endpoints.system -> app.application.mediaserver",
     "app.api.endpoints.system -> app.application.messaging",
     "app.api.endpoints.system -> app.application.messaging.message",
     "app.api.endpoints.system -> app.application.network",
@@ -3904,6 +3905,8 @@
     "app.application.security.twofactor -> app.runtime.log",
     "app.application.security.url -> app.application",
     "app.application.security.url -> app.application.configuration",
+    "app.application.security.url -> app.foundation",
+    "app.application.security.url -> app.foundation.url",
     "app.application.security.url -> app.runtime",
     "app.application.security.url -> app.runtime.coalesce",
     "app.application.security.url -> app.runtime.log",
