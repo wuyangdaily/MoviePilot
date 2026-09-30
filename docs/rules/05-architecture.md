@@ -89,6 +89,7 @@ to make the directory tree look symmetrical.
 | `app/agent/tasks.py` | Background prompts, durable scheduled-task execution and heartbeat wakeups |
 | `app/agent/orchestrator.py` | One `MoviePilotAgent` execution instance: prompt/tool/middleware assembly, model invocation, streaming and per-agent state |
 | `app/agent/middleware/plan.py` | Current task objective, step status and evidence in graph state; sanitized snapshots travel through existing message persistence and never authorize tool effects |
+| `app/application/messaging/recall.py` / `app/agent/history/` | Application 持有独立消息库 DTO/Port 和后台维护服务；Agent 专属 SQLite/FTS5 schema、存储、检索、窗口与旧快照导入由 `agent/history/` 拥有，数据库位于 Agent 运行目录且不共享主库 Session。`db/adapters/recall.py` 仅负责一次性旧快照只读导出 |
 | `app/agent/middleware/selection.py` | First-turn tool selection and bounded, on-demand discovery within the same authorized catalog; discovered tool names remain local to the current user request |
 | `app/agent/middleware/invocation.py` | Claims write executions through the injected Application port; owns per-turn API deduplication, durable receipt projection and narrowly scoped read-only reconciliation |
 | `app/agent/middleware/output.py` | Bounded, expiring in-memory tool output and thread-scoped pagination; never persists raw tool results |
@@ -400,6 +401,7 @@ API 中允许丢失或可重建的进程内任务必须登记到 `app/runtime/ta
 进入 Outbox 或持久任务表，不能把 TaskRegistry 当成 durable queue。
 Runtime 关闭后不可逆；完整应用生命周期的再次启动必须由新进程承载，不能在同一解释器中重建局部资源域。
 插件需要浏览器时使用 `app.sdk.browser`，由宿主浏览器适配器协调资源，不直接依赖资源实现。
+插件需要飞书事件长连接时使用 `app.sdk.feishu.FeishuLongConnection`，与宿主飞书模块共用同一传输实现，不再各自依赖 lark-oapi。
 旧插件若直接导入有资源前置条件的第三方包，compat 在插件 import 前递归扫描源码并保守准备资源；
 无法精确解析的文件按全部已登记资源降级，最终可导入性仍由 Python loader 判断。
 
@@ -1214,7 +1216,7 @@ driven workflow registration.
 | `app/application/security/url.py` | URL/path validation, SSRF protection and signed image policy |
 | `app/application/mediaserver.py` | Configured media-server discovery and identity matching |
 | `app/runtime/compat/manifest.py` | Exact legacy-to-canonical import manifest |
-| `app/sdk/` | Stable plugin imports, including provider-neutral browser launch functions |
+| `app/sdk/` | Stable plugin imports, including provider-neutral browser launch functions and the Feishu event long connection |
 | `app/sdk/plugin/` | Plugin contract base class (`base.py`) and runtime manager facade (`manager.py`); the package root is a lazy export map so importing the contract does not load the managers |
 
 Run `tests/test_architecture_dependencies.py` after every ownership or import
