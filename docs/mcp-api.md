@@ -45,7 +45,7 @@ Fake-IP 等非公网解析地址需要通过 `IMAGE_PROXY_ALLOWED_PRIVATE_RANGES
 
 ### 动态插件工具
 
-内置 Agent 的 `update_plan`、`search_memory`、`session_search`、`search_tools`、`read_tool_result`、`get_tool_execution` 为会话中间件工具，不通过外部 `tools/list` 发布；它们维护计划、检索用户隔离的历史证据、发现工具、续读结果或查询执行回执，不能授予业务操作权限。`search_memory` 只保留稳定偏好和主题文件检索，旧 `activity` 分类已废弃。历史查询使用宿主绑定的 user_id，不接受模型指定身份。使用与恢复语义见 [Agent 复杂任务执行与恢复](agent.md)。
+内置 Agent 的 `update_plan`、`search_memory`、`session_search`、`memory`、`skills_list`、`skill_view`、`skill_manage`、`search_tools`、`read_tool_result`、`get_tool_execution` 为会话中间件工具，不通过外部 `tools/list` 发布；它们维护计划、检索用户隔离的历史证据、发现工具、续读结果或查询执行回执，不能授予业务操作权限。`search_memory` 只保留稳定偏好和主题文件检索，旧 `activity` 分类已废弃。历史查询使用宿主绑定的 user_id，不接受模型指定身份。使用与恢复语义见 [Agent 复杂任务执行与恢复](agent.md)。
 
 `tools/list` 会同时返回 MoviePilot 内置工具和已启用插件通过 `get_agent_tools()` 声明的工具。插件启动、停止、重载或配置生效后，MCP 工具管理器会在下一次列出或调用工具时按注册表版本惰性刷新，避免继续暴露已移除的工具或遗漏新工具。
 
@@ -187,6 +187,15 @@ operation ID、权限、副作用、确认、恢复、结果敏感性及精确�
 ```
 
 只允许传 `tools/list` 对应 operation 分支中声明的 `path_params`、`query` 和 `body` 字段。不得传 URL、认证头、API Token 或任意 HTTP 方法。
+
+内置 Agent 工具同样禁止额外顶层字段。业务参数不能平铺在 `operation_id` 旁边：
+例如 `media.detail` 的 `media_id` 属于 `path_params`，`media_source` 与 `type_name` 属于 `query`；
+`subscription.execution.list` 使用 `query.limit`，不能套用其它列表的 `page` / `count`；
+`site.rss` 支持 `query.page` / `query.count`，不接受 `site_id` 筛选。
+工具说明内联了这三个接口的完整 JSON 示例，示例 ID 必须替换为前序查询返回的真实 ID。
+参数错误在请求发出前返回纠错回执和该 operation 的 `input_contract`（网关错误码为 `invalid_input`），
+并指出具体缺失或错误字段（如 `query.media_source`）、未声明字段或顶层参数的正确位置，
+不回显参数值。模型应根据该合同修正参数后重试；写入参数错误不会创建执行认领。
 
 `body` 使用原生 JSON 值。对象和数组直接传入；仅在选定的 operation 允许时传 `null`。当前唯一的字符串请求体为 `system.upgrade.dev` 的固定值 `"dev"`。网关会按选定的 operation 合同校验请求体类型和字段。
 
@@ -341,7 +350,7 @@ MoviePilot 也提供普通 REST API 给前端和自动化客户端使用。所�
 - 成功和失败响应都只包含 `success`、`message`、`data` 三个顶层字段；各接口只有 `data` 的模型可以变化。
 - 成功响应为 `{"success": true, "message": "", "data": <接口数据>}`。HTTP 错误保留原状态码，返回 `{"success": false, "message": <错误原因>, "data": null}`；请求参数校验错误会在 `data` 中附带结构化错误列表。
 - 查询接口未命中但请求已正常完成时仍返回 `success=true`，存在性等业务状态通过 `data` 表达。例如 `/mediaserver/exists` 未命中时返回空的 `data.item`。
-- 每个普通 JSON 端点都会在 OpenAPI 中声明具体的 `Response[DataModel]`，调用方可从 `/docs` 或 `/api/v1/openapi.json` 查询数据结构。
+- 每个普通 JSON 端点都会在 OpenAPI 中声明具体的 `Response[DataModel]`，开放 API 文档后，调用方可从 `/docs` 或 `/api/v1/openapi.json` 查询数据结构。
 - SSE、文件、图片、HTML、空响应，以及 OAuth2 登录、OpenAI、Anthropic、MCP JSON-RPC 等标准协议端点保持协议原生响应体；它们会在 OpenAPI 中显式声明对应的流、文件或协议模型。
 - 插件通过 `get_api()` 动态注册的 `/api/v1/plugin/...` 端点不属于主程序统一响应信封范围。插件自行声明响应模型、状态码和返回体，宿主只补充路径与鉴权依赖。
 
@@ -383,7 +392,7 @@ GitHub Token 是可选的管理员配置，可在设置页或首次初始化页�
 
 FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返回顶层 `detail` / `detail_i18n`。
 
-交互式接口文档 `/docs` 读取 `/api/v1/openapi.json`，页面版本号直接使用 `version.py` 中的后端 `APP_VERSION`。
+交互式接口文档 `/docs`（Swagger UI）和 `/redoc` 读取 `/api/v1/openapi.json`，页面版本号直接使用 `version.py` 中的后端 `APP_VERSION`。这三个地址默认关闭，返回 404；在系统设置「高级设置 → 实验室」中打开「开放 API 文档」（`API_DOCS_ENABLE`）后立即可用，无需重启。文档在首次访问时生成，之后会常驻约 20–30MB 内存；关闭开关后，下一次文档请求会释放缓存的文档，其余内部缓存在重启后释放。镜像内置的 nginx 只转发 `/api` 路径，`/docs` 和 `/redoc` 需要直接访问后端端口。
 
 #### 系统更新
 
@@ -897,6 +906,9 @@ SDK method。普通 MCP 客户端如需这些 provider 原生能力，应使用�
 宿主按 `operation_id` 决定固定 method 与 path，使用真实持久化管理员身份为
 API KEY 集成签发短期本机令牌，并按 operation 执行权限、确认、结果脱敏和恢复策略。
 调用方不能注入 host、URL、认证头或 API Token。
+通知渠道的 `subscription.add`、`subscription.update`、`subscription.delete` 使用渠道账号绑定的
+有效 MoviePilot 用户身份，渠道管理员也不会借用超级管理员身份。创建时订阅归属绑定用户，
+普通用户只能修改或删除自己的订阅；未绑定或绑定用户已停用时拒绝执行。三项操作仍保留确认机制。
 Web Agent 直接调用 `moviepilot_api` 时，宿主会自动加载 `moviepilot-api` Skill
 的 operation 白名单后再执行；这只是授权兜底，不会放宽固定 operation、身份、权限
 或确认策略。
