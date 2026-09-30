@@ -938,7 +938,10 @@ def install_frontend(
     frontend_version: str,
     node_version: str,
     archive: Optional[Path] = None,
+    *,
+    force: bool = False,
 ) -> dict[str, str]:
+    """安装前端发布包；DEV 更新强制替换同版本重新打包的制品。"""
     if archive:
         version_tag = (frontend_version or "").strip()
         if not version_tag:
@@ -950,7 +953,7 @@ def install_frontend(
         version_tag, download_url = _resolve_frontend_release(frontend_version)
     node_bin = install_node_runtime(node_version)
 
-    if _frontend_runtime_ready(version_tag):
+    if not force and _frontend_runtime_ready(version_tag):
         _write_local_frontend_service_script(PUBLIC_DIR)
         print_step(f"前端发布包已是最新版本：{version_tag}")
         return {"version": version_tag, "node": str(node_bin)}
@@ -3799,6 +3802,7 @@ def _ensure_git_clean() -> None:
 
 
 def _update_backend_ref(ref: str, *, fetch: bool = True) -> str:
+    """同步后端 Git 引用；分支快进到远端，离线标签不访问网络。"""
     if not (ROOT / ".git").exists():
         raise RuntimeError("当前目录不是 Git 仓库，无法更新后端代码。")
 
@@ -3825,7 +3829,32 @@ def _update_backend_ref(ref: str, *, fetch: bool = True) -> str:
 
     print_step(f"切换后端代码到指定版本：{ref}")
     run(["git", "checkout", ref], cwd=ROOT)
+    if fetch and _git_output("rev-parse", "--abbrev-ref", "HEAD") == ref:
+        run(["git", "pull", "--ff-only", "origin", ref], cwd=ROOT)
     return ref
+
+
+def _dev_update_enabled(args: argparse.Namespace) -> bool:
+    """按命令选项及配置判定 DEV 模式，离线安装不继承 DEV 偏好。"""
+    value = os.environ.get("MOVIEPILOT_UPDATE_DEV")
+    if value is None:
+        value = read_env_value("MOVIEPILOT_UPDATE_DEV") or "false"
+    dev = args.dev if args.dev is not None else value.strip().lower() in {
+        "1", "true", "yes", "y", "on"
+    }
+    return dev and not args.offline_backend
+
+
+def _resolve_update_versions(args: argparse.Namespace) -> tuple[str, Optional[str]]:
+    """更新命令读取 Dev 偏好；显式版本优先，离线安装始终使用已确认制品。"""
+    dev = _dev_update_enabled(args)
+    ref = args.ref
+    if not ref:
+        ref = "latest"
+        if dev and args.target in {"backend", "all"} and _git_output("rev-parse", "--abbrev-ref", "HEAD") == "HEAD":
+            ref = RESOURCE_VERSION_FLAG
+    frontend_version = args.frontend_version or ("latest" if dev else None)
+    return ref, frontend_version
 
 
 def update_backend(
@@ -3836,6 +3865,7 @@ def update_backend(
     recreate: bool,
     fetch: bool = True,
 ) -> Path:
+    """更新指定后端版本并同步其虚拟环境依赖。"""
     ensure_services_stopped()
     resolved_ref = _update_backend_ref(ref=ref, fetch=fetch)
     venv_python = install_deps(
@@ -3920,6 +3950,7 @@ def run_agent_request(
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """定义本地安装、显式更新和初始化命令的参数。"""
     parser = argparse.ArgumentParser(description="MoviePilot 本地安装与初始化工具")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -4049,13 +4080,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_parser = subparsers.add_parser("update", help="更新本地后端、前端或全部组件")
     update_parser.add_argument(
-        "target", choices=["backend", "frontend", "all"], help="更新目标"
+        "target", nargs="?", default="all", choices=["backend", "frontend", "all"], help="更新目标，默认 all"
     )
     update_parser.add_argument(
-        "--ref", default="latest", help="后端 Git 版本，默认 latest"
+        "--ref", help="后端 Git 版本，默认跟踪当前分支；DEV 模式下 detached HEAD 回到 v3"
     )
     update_parser.add_argument(
-        "--frontend-version", help="前端版本，默认使用 version.py 中的 FRONTEND_VERSION"
+        "--dev", action=argparse.BooleanOptionalAction, default=None,
+        help="使用 DEV 更新模式，默认读取 MOVIEPILOT_UPDATE_DEV；--no-dev 关闭"
+    )
+    update_parser.add_argument(
+        "--frontend-version", help="前端版本，DEV 默认 latest，否则使用 version.py 中的 FRONTEND_VERSION"
     )
     update_parser.add_argument(
         "--frontend-archive",
@@ -4138,6 +4173,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """按选定配置目录执行本地管理命令并返回退出码。"""
     parser = build_parser()
     args = parser.parse_args()
     explicit_config_dir = (
@@ -4265,10 +4301,11 @@ def main() -> int:
             return 0
 
         if args.command == "update":
+            ref, frontend_version = _resolve_update_versions(args)
             ensure_services_stopped()
             if args.target in {"backend", "all"}:
                 update_backend(
-                    ref=args.ref,
+                    ref=ref,
                     python_bin=args.python,
                     venv_dir=Path(args.venv),
                     recreate=args.recreate,
@@ -4276,9 +4313,10 @@ def main() -> int:
                 )
             if args.target in {"frontend", "all"}:
                 frontend_result = install_frontend(
-                    frontend_version=args.frontend_version,
+                    frontend_version=frontend_version,
                     node_version=args.node_version,
                     archive=Path(args.frontend_archive) if args.frontend_archive else None,
+                    force=_dev_update_enabled(args),
                 )
                 print_step(f"前端更新完成，版本：{frontend_result['version']}")
             if args.target == "all" and not args.skip_resources:
