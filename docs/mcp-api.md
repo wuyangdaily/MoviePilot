@@ -414,7 +414,7 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 | POST | `/api/v1/media/scrape/{storage}` | 刮削媒体元数据；请求体为 `FileItem`，可选查询参数 `media_source`、`media_id`、`type_name`（电影/电视剧/音乐）和 TMDB `episode_group`。剧集组用于指定电视剧的季集顺序；音乐会按策略处理音频标签、封面和歌词 |
 | POST | `/api/v1/transfer/manual/target-path` | 按源文件与目录配置匹配手动整理目标路径；请求体为 `ManualTransferItem`，该接口不执行媒体识别 |
 | POST | `/api/v1/transfer/manual/history` | 查询文件、批量文件或目录命中的成功整理历史摘要，用于进入手动整理界面时显示重新整理状态 |
-| POST | `/api/v1/transfer/manual` | 手动整理；请求体可用 `media_source` + `media_id` 指定本次识别与刮削数据源；`logids` 会先还原为同一个显式文件批次，多首音乐因而共享专辑识别上下文；音乐请求未传 `music_type` 时，目录按 `album`、文件按 `recording` 解释；可用最多三项的 `music_release_regions`（ISO 3166-1）和 `music_release_scripts`（ISO 15924）仅覆盖本次 MusicBrainz 发行版本排序，省略时继承系统设置；命中持久失败历史，且未指定媒体身份、未开启 `reorganize` 时，由调度器重试原计划（包括 `logid` 历史入口）；显式重整先校验并放弃确定失败任务，再清理旧目标和记录；旧版失败历史仍清理后重试；`reorganize=true` 时清理命中的成功历史和非移动模式旧目标后重新整理 |
+| POST | `/api/v1/transfer/manual` | 手动整理；请求体可用 `media_source` + `media_id` 指定本次识别与刮削数据源；`logids` 会先还原为同一个显式文件批次，多首音乐因而共享专辑识别上下文；音乐请求未传 `music_type` 时，目录按 `album`、文件按 `recording` 解释；使用 `music_type=album` 和 MusicBrainz 发行组 `media_id` 时，可另传 `musicbrainz_release_id`（Release UUID）明确选定发行版；后端核验该版属于该发行组，失败不改用默认版；`GET /api/v1/music/album/{album_id}` 接受同名可选查询参数用于预先核对该版曲目；预览与执行须保持相同 ID 和文件范围；可用最多三项的 `music_release_regions`（ISO 3166-1）和 `music_release_scripts`（ISO 15924）仅覆盖本次 MusicBrainz 发行版本排序，省略时继承系统设置；命中持久失败历史，且未指定媒体身份、未开启 `reorganize` 时，由调度器重试原计划（包括 `logid` 历史入口）；显式重整先校验并放弃确定失败任务，再清理旧目标和记录；旧版失败历史仍清理后重试；`reorganize=true` 时清理命中的成功历史和非移动模式旧目标后重新整理 |
 | GET | `/api/v1/transfer/tasks/manual-reviews` | 管理员分页查询 durable 人工复核任务；`state` 仅允许 `manual_review`（默认）或已经人工判定、等待调度恢复的 `retry_wait`，支持 `page` 与 `page_size`。响应只公开任务、源文件、状态、步骤意图/证据/错误和复核修订号，不返回 lease 或 attempt 身份 |
 | GET | `/api/v1/transfer/tasks/{task_id}/manual-review` | 管理员查询单个 durable 人工复核任务详情；仅可读取 `manual_review` 或已经人工判定的 `retry_wait` 任务，其余状态按不存在处理 |
 | POST | `/api/v1/transfer/tasks/{task_id}/manual-review` | 管理员判定处于 `manual_review` 的 durable 整理步骤；请求包含 `operation_id`、`decision=not_applied|applied`，`reason` 选填，省略或空白时记为空字符串，最多 2000 字符；`applied` 还必须提供 `result_payload`。`failed` 不属于公开决策，失败终态只能由持租约的 durable 结算写入；响应仅返回任务、操作、决策、后续状态和复核修订号 |
@@ -438,13 +438,17 @@ SMB 配置支持两种明确的路径模式：旧字段 `share: "data"` 保持�
 新字段 `shares: ["video", "downloads"]` 使用虚拟根目录，路径首段为共享名称。
 即使多共享模式只剩一项，也不会自动退回旧路径语义。所有共享使用同一主机、
 账号和 SMB 服务；浏览 `/` 返回 `/video/`、`/downloads/`，只允许访问已配置的共享。
-虚拟根和共享根不可删除、重命名或作为文件整理目标；多个共享的磁盘容量不相加，
-因为它们可能指向同一卷，多共享用量返回不可用。
+虚拟根和共享根不可删除、重命名；虚拟根不能作为媒体库目录，共享根（例如 `/video`）可以。
+存储卡片和仪表板显示配置中首个共享报告的卷容量及当前账号可用空间，不累加其他共享。
+多个共享可能共用存储池，SMB 卷序列号也不一定代表独立磁盘；若共享属于不同卷，
+显示的是首项所在卷的容量，并非整台服务器的总容量。
 
 对 `10.10.10.11` 的 `downloads` 和 `video` 共享，可选择源存储 `smb`、
 源目录 `/downloads`，目标存储 `smb`、目标目录 `/video/电影`；下载器映射使用
 `["smb:/downloads", "/downloads"]`。切换新旧模式后须更新目录设置、下载器映射及
 其他已保存路径；应先处理完旧路径的在途整理任务，不会自动重写历史任务。
+若开启按媒体类型、类别自动建目录，媒体库根目录可设为 `/video`，由整理规则追加子目录。
+同路径的远程监控目录收到缺少存储前缀的下载器路径时，日志会提示检查路径映射。
 
 同一 SMB 服务内，`copy` 对共享内和跨共享文件都使用服务端 CopyChunk；
 `move` 在同一共享内使用重命名，跨共享使用服务端复制成功后删除源文件。
@@ -477,6 +481,21 @@ SMB 配置支持两种明确的路径模式：旧字段 `share: "data"` 保持�
 | POST | `/api/v1/media/classification/rollback/{revision}` | 超级管理员将指定历史策略作为新版本发布，需要当前 `expected_revision` 和写操作确认 |
 
 `transfer/manual` 在 `preview=true` 时保留预览的 `summary/items/message`，不返回执行状态。
+预览项新增可选 `source_storage/source_item/music`。`source_item` 保留本次源文件的存储标识，
+不包含下载 URL、缩略图和递归子节点；纠正时可复用实际选中文件，不能根据目录名扩大范围。
+音乐 `music.status` 区分 `local_tags`（可信标签）、`local_cue`（本地 CUE）、
+`matched`（在线已确认）、`manual`（本次或已记录的人工选择）、`metadata`（已有信息但没有在线核验证据）、
+`not_found`、`ambiguous`、`conflict`、`service_error`、`budget_exhausted`、`unsupported`。
+它与预览项 `success` 独立：已确认身份仍可能因目标目录或分类失败；仅标签含 MBID 不算在线确认。
+`online_confirmed` 仅在 `matched` 时为真。`field_sources` 表明曲名、专辑、艺人、曲序等字段的实际来源，
+`candidates` 最多五条，只保留身份及展示摘要，不把评分显示为置信概率。
+`read_status` 区分 `tags/stream_only/unreadable/name_only/companion/unknown`：
+无标签、读取失败及仅有远端名称证据不是同一种状态。
+`group_id/group_directory/group_size` 由本次实际发行分组生成（数量为音频成员数），
+CUE 和歌词通过 `file_role=companion` 与音频共享组；同目录不同发行以及不同存储不混组。
+该分组只供当前已预览文件聚合，不是访问凭证、数据库身份或展开目录的授权；
+按组纠正必须只提交该组已预览的 `source_item`，并重新预览，不能把选定专辑应用到整包其它发行。
+尚未解包或提取的音乐包返回逐文件 `unsupported`，计入失败统计，不再仅在批次总提示中出现。
 请求可传入 `skip_success=true`，在预览与执行中跳过同存储、同源路径已成功整理的文件，
 也识别成功移动后的目标现址。该选项优先于 `reorganize` 和历史入口的强制整理，
 不清理被跳过文件的历史和旧目标；失败记录及未处理文件继续原有流程，默认 `false` 保持现有行为。
@@ -534,6 +553,20 @@ AniList 榜单、探索、详情、人物和推荐接口优先通过 `anilist-ch
 音乐与影视共用媒体搜索、资源查询、过滤、匹配和订阅搜索编排。资源 `meta_info` 来自
 标题、副标题的实际解析，不用目标媒体回填证据；`title_aliases`、`album_aliases`、
 `artist_aliases` 分别保留同一实体的可信别名及展示转简体前的原文。
+
+音乐元数据、单曲和专辑模型还分别保留 `composers`、`conductors`、`orchestras` 人名列表，
+以及 `performers` 乐器/声部到人名列表的映射（未指定乐器使用 `performer` 键）。
+这些字段不会混入主艺人或艺人别名；空字段在简化卡片中省略，完整模型与旧缓存兼容。
+明确的 PT 副标题角色和原生标签可提供本地证据，完整标签仍可直接整理。
+MusicBrainz 从实际 Recording/Work 关系补充角色，不凭作品名推断演奏者；
+角色摘要不足时每批最多补查三个录音详情，沿用已有 HTTP 预算和缓存。
+自动识别拒绝已知阵容冲突，仅有作曲家相同不足以确认录音；明确录音/发行 ID 可补足缺失关系，
+但不能覆盖已知冲突。整专可用实际逐曲关系核验阵容，不把专辑或某一曲的角色广播到其他曲目。
+
+角色标签使用 ID3 的 `TCOM`/`TPE3`/`TMCL`（兼容 v2.3 `IPLS`）、Vorbis/APEv2 文本字段，
+以及 MP4 的 `©wrt` 和 `CONDUCTOR` freeform。独立 `ORCHESTRA` 和 MP4 `PERFORMER` 为兼容自定义字段，
+并非所有播放器都支持；制作人不会被当作演奏者。映射参照
+[Picard 标签对照](https://picard-docs.musicbrainz.org/en/v3.0/_static/MusicBrainz_Picard_Tag_Map.html)。
 音乐资源解析同样应用全局或订阅自定义识别词，`MusicMeta.apply_words` 返回实际应用记录，
 旧结果缺少该字段时按空列表处理。副标题的明确录音版本参与匹配；单曲所属专辑字段
 不能证明资源覆盖整张专辑，无曲序的单曲也会标记为 `partial_album` 待确认项。
@@ -582,11 +615,17 @@ SSE 的 `candidate_items` 是站点原始返回数量，`match_counts` 记录身
 全部成功后原子替换目标；源文件字节与权限保持不变。实际发生写入后，目标成为普通文件，
 会独立占用磁盘空间。未发生标签变化且没有其它写入时保留原链接；跳过标签及封面可保持链接整理。
 写入失败或目标在处理期间改变时，丢弃临时副本，不覆盖原目标。LRC 与 Lyricsfile 旁挂也按目录项原子替换。
-WAV、DSF 和 MP3 使用原生 ID3 帧，MP4/M4A 使用标准 atom 及文本 freeform；无标签音频可直接补写，
+WAV、DSF、AIFF、DSDIFF 和 MP3 使用原生 ID3 帧，MP4/M4A 使用标准 atom 及文本 freeform；无标签音频可直接补写，
 错误扩展名按实际容器处理。Recording、Release、Release Group、Release Track ID 分别写入专用标签；
 仅有首发年份时只写原始年份标签，不能据此生成当前发行日期；已有同年的完整日期不因模型只携带年份而截断。
 APEv2 按[标准标签映射](https://picard-docs.musicbrainz.org/en/latest/appendices/tag_mapping.html)
 使用下划线形式的 MusicBrainz 字段和 `Originalyear`，不套用 ID3 的带空格描述；读取仍兼容旧字段别名。
+WMA/ASF 使用 `Title`、`Author`、`WM/AlbumTitle`、`WM/PartOfSet`、`MusicBrainz/*` 等原生属性，
+兼容旧版小写字段；标准 `WM/TrackNumber` 从 1 开始，旧 `WM/Track` 从 0 开始。
+`WM/Lyrics` 可读取纯文本歌词，`WM/Picture` 可补写封面，沿用相同的链接隔离与覆盖策略。
+WMA Lossless 只由实际 Codec List 类型确认，不从高码率或扩展名猜测，未提供的位深保持未知。
+独立乐团/演奏者字段 `WM/Orchestra`、`WM/Performer` 为自定义兼容属性。
+等价的组合/独立曲数标签不会触发音频复制；曲数、碟数和更精确的原有日期保持有效。
 
 音乐整理按每个文件的 `storage` 决定证据来源：远端仅使用名称、目录和原始种子线索，
 不读取本机同路径的标签、时长或 CUE。仅有 `.m4a` 扩展名时不声明 AAC/ALAC 或有损/无损。
