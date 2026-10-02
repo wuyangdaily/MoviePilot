@@ -116,12 +116,11 @@
     "union-attr": 1
   },
   "app/adapters/web/plugin/routes.py": {
-    "type-arg": 2
+    "type-arg": 1
   },
   "app/agent/callback/__init__.py": {
-    "no-untyped-call": 5,
-    "no-untyped-def": 9,
-    "return-value": 1,
+    "no-untyped-call": 3,
+    "no-untyped-def": 8,
     "type-arg": 1
   },
   "app/agent/contracts.py": {
@@ -206,7 +205,7 @@
     "no-any-return": 7,
     "no-untyped-call": 3,
     "no-untyped-def": 13,
-    "type-arg": 13,
+    "type-arg": 12,
     "union-attr": 3,
     "var-annotated": 1
   },
@@ -1809,10 +1808,8 @@
     "type-arg": 5
   },
   "app/modules/indexer/spider/mtorrent.py": {
-    "arg-type": 5,
+    "arg-type": 3,
     "assignment": 4,
-    "no-untyped-def": 1,
-    "type-arg": 5,
     "var-annotated": 1
   },
   "app/modules/indexer/spider/rousi.py": {

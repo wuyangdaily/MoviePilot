@@ -14,7 +14,7 @@
 | 外部内容 FTS5、触发器原子同步 | 正文只保存一次，FTS 读取固定视图；正文与索引在同一事务提交 |
 | 标准工具正文前缀 8192、工具 JSON 独立列 | 标准索引保持同一投影；显式 `role_filter="tool"` 搜原始完整工具正文 |
 | trigram 排除 tool、cron、subagent 及工具调用 JSON | 相同索引范围，减少大结果和重复自动任务的索引体积 |
-| `native/fts5_cjk` 的 `cjk_unicode61` | 原版 C 源码随仓库提供，附固定来源和 MIT 许可；可选安装，不用自行生成 n-gram 替代分词语义 |
+| `native/fts5_cjk` 的 `cjk_unicode61` | 原版 C 源码随仓库提供，附固定来源和 MIT 许可；Docker 构建与 CLI 安装接入，不用自行生成 n-gram 替代分词语义 |
 | `hermes_state_search.py`：BM25、短语/布尔/前缀、子串及 OR 重试 | `agent/history/query.py` / `search.py`：普通词首先 FTS5；无结果时子串索引重试，最后允许非 CJK 多词查询 OR 放宽；显式 OR/NOT 不放宽 |
 | CJK → bigram → trigram → LIKE | 两字中文在可选 tokenizer 可用时走 bigram，三字可走 trigram；单字、缺失索引和显式工具全文回退，响应报告实际路径 |
 | `tools/session_search_tool.py`：300 候选、默认3/最多10会话、谱系去重 | 相同预算；隐藏 subagent/tool/kanban，cron 排在交互会话后；排除已看谱系；标题优先尝试最新同名续篇 |
@@ -36,12 +36,18 @@
 
 ## 中文分词器
 
-标准 FTS5 和 trigram 来自 SQLite。可选 CJK tokenizer 源码在 `native/fts5_cjk/`，与 Hermes 的可选本地扩展机制一致。按运行环境架构编译并安装到固定目录 `config/agent/runtime/lib/libfts5_cjk.so`，具体命令见该目录 README；Agent 请求不会调用编译器。每次连接只临时开启扩展加载，加载后立即关闭。
+标准 FTS5 和 trigram 来自 SQLite。CJK tokenizer 源码在 `native/fts5_cjk/`。Docker 构建按目标架构编译，使用实际运行时 Python 验证后安装到 `/opt/venv/lib/moviepilot/libfts5_cjk.so`，不会被 `/config` 挂载遮住。CLI 的 `setup`、`install deps`、后端更新会使用所选 venv 编译和验证，同源码、架构且加载验收通过时复用已有文件。运行时优先加载 `<sys.prefix>/lib/moviepilot/libfts5_cjk.so`，失败或不存在时兼容旧位置 `config/agent/runtime/lib/libfts5_cjk.so`。Agent 请求不会调用编译器，每次连接只临时开启扩展加载，加载后立即关闭。
+
+已有 CLI 安装可以运行 `moviepilot install cjk --venv /path/to/venv` 补装，追加 `--check` 只验证。缺少编译器或 SQLite 不支持扩展时，自动安装会明确告警；显式补装/检查返回非零退出码。Docker 旧镜像需要更换为包含本扩展的新构建，单纯更新后端源码不会补出本地库。编译器要求和 Docker 检查命令见 [安装说明](../native/fts5_cjk/README.md)。
 
 没有 CJK 扩展时，两字中文会走 LIKE；这与 Hermes 的能力回退一致，但不等于索引速度。SQLite VM 查询期限限制扫描，超时返回 `query_timeout`/未完成，不能解读为“没有相关内容”。安装扩展后的旧消息在后台分批建索引，期间继续报告索引未就绪。不要跨平台复制已编译二进制。
+
+扩展安装验收使用内存库实际索引“电影订阅成功”并查询“订阅”；这只证明运行环境能力。各用户历史索引完成后，`session_search` 返回 `index_status.messages_fts_cjk=true`，符合条件的两字查询返回 `search_path="cjk"`，才说明该次查询确实使用了中文索引。
 
 ## 能力边界和验证
 
 FTS5 是词项检索，不保证任意语义改写都能命中。模型应依据结果用同义词、对象编号、OR、时间区间和已看会话排除继续查询，再用锚点上下文核实。用户明确提供的 URL、文件或实时系统仍然优先读取，不能仅凭历史无命中判断目标不存在。完整存储也不等于完整展示，不能用被截断的单条证据断言工具成功。
 
 `tests/test_agent_recall_persistence.py` 覆盖身份隔离、FTS 查询语义、CJK 原版分词器、索引回填并发写删、原文/展示分离、压缩可见性、真实 LangChain 工具回执、超时、删除与保留期；所有数据均为临时测试数据，无真实业务网络请求。查询计划验证 FTS 虚表和会话索引；规模与真实模型评估应单独报告数据量、索引能力、耗时和未验证范围，不能由单元测试通过推断智能提升。
+
+阶段五补充了真实 LangChain 图回归：最终请求压缩完成后，以实际已提交状态的消息 ID 标记移出原文；模型调用失败时不提前提交压缩。成功的同一会话仍可从独立 FTS 证据库召回被压缩内容，下一会话读取的是原文证据而非压缩摘要。后台学习组合测试进一步验证十次真实工具回合触发复盘，记忆与技能落盘后由同一用户下一会话加载，另一用户目录保持隔离。

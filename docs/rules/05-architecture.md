@@ -377,6 +377,9 @@ ModuleManager 与 startup 组合根继续关闭其余资源但必须向上返回
 等领域关闭入口必须直接传播 Runtime 的整体结果，不得以单个能力快照或无返回包装器覆盖失败。
 消息渠道模块必须通过 `_MessageChannelModuleBase._stop_service_instances()` 聚合多实例关闭结果；
 长连接、轮询或 Socket 服务只有在真实终止后才能返回成功，超时 owner 不得清空句柄。
+Agent 渠道流式回复的分段与停止共用 `StreamingHandler` 的唯一刷新任务；运行中补充输入只登记
+文本边界，不能另建发送任务或覆盖在途消息身份。旧回复的同步收口统一由
+`_finalize_current_message()` 等待宿主线程池完成，再发布新回复；停止同样等待在途刷新收敛。
 应用消息队列的监控线程遵守同一收敛语义：停止必须有限等待，回调阻塞导致线程仍存活时保留 owner
 并向 startup 返回 `False`，不得用无界 `join()` 阻塞生命周期或把日志当作成功。
 共享 `ThreadHelper` 必须追踪通过宿主 `submit()` 和旧兼容 `.pool.submit()` 接受的全部 Future；关闭时
@@ -662,6 +665,17 @@ remain. Download history, file rows and the durable Outbox intent commit in one
 transaction; notifications, background post-processing and immediate event
 publication run only after that commit succeeds.
 
+`batch.py` keeps its candidate state in a private per-invocation runner, never on
+the shared Chain. After one selection/sort pass, it executes movie/music, whole
+season, labelled episode-pack and partial-pack phases in that order. The phases
+share failure cooldown and update missing seasons/episodes only after successful
+submission, using the rules in `app.application.download.selection`. Whole-season
+file inspection retains its metadata update even when coverage is insufficient,
+so later phases can still evaluate the candidate's identified episode range.
+Partial-pack inspection updates that range only after successful submission.
+The public `batch_download` signature and the supplied missing-map identity remain
+unchanged.
+
 Search orchestration is owned by the same-named `app.chain.search` package. Its
 root lazily exposes only the stable `SearchChain`; `facade.py` preserves the
 direct `SearchChain -> ChainBase` MRO, event identity and the three exact private
@@ -716,6 +730,12 @@ SMB 同存储整理由 `app.modules.filemanager.storages.smb` 持有协议调用
 `smbclient.remove` 删除源文件。多共享挂载仍属于同一 SMB owner，路径首段选择已配置的共享。源目标同文件检查也通过 SMB 查询，不能使用本地临时下载/上传回退。
 下载器返回的远程路径保留存储 URI，整理 Chain 通过 `StorageChain` 查询源文件，
 不直接依赖 SMB SDK；断线后目标状态不明沿用持久步骤的保守恢复合同。
+
+SMB 目录快照不依赖祖先目录 mtime 推断后代变化，而在既有递归深度上限内逐层列举。
+存储通过 `snapshot_strict_query` 声明已实现 `get_item_strict` / `list_strict`；
+严格快照的任一查询失败必须返回 `None`，由远程轮询器保留旧基线并重试。
+只有确认目录清空或根路径不存在时才返回空字典。SMB 普通文件浏览继续允许容错回退，
+严格快照不能复用其部分结果；其他存储需按各自查询合同逐步接入。
 
 `app.modules.filemanager` is a lazy compatibility entrypoint. The concrete
 `FileManagerModule` implementation lives in `app.modules.filemanager.module`,

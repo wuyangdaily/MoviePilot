@@ -2969,10 +2969,27 @@ def install_deps(*, python_bin: str, venv_dir: Path, recreate: bool) -> Path:
         else:
             expose_uv_to_venv(uv_bin, venv_dir)
         install_browser_runtime(venv_python)
+        install_cjk(venv_python, required=False)
         return venv_python
     finally:
         if temporary_uv_dir is not None:
             temporary_uv_dir.cleanup()
+
+
+def install_cjk(venv_python: Path, *, required: bool = True, check: bool = False) -> None:
+    """由目标解释器安装和验收扩展；自动安装失败明确告警，单独补装失败返回错误。"""
+    command = [str(venv_python), str(ROOT / "native/fts5_cjk/install.py")]
+    if check:
+        command.append("--check")
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=180, cwd=ROOT)
+        print_step(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError) as error:
+        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+        message = f"CJK 扩展安装/检查失败：{detail}"
+        if required:
+            raise RuntimeError(message) from error
+        print_step(f"{message}；历史检索暂用 trigram/LIKE 回退，可运行 moviepilot install cjk 重试")
 
 
 def install_browser_runtime(venv_python: Path) -> None:
@@ -2997,13 +3014,19 @@ def _startup_platform_name() -> str:
 def _runtime_python_candidates(
     runtime_python: Optional[Path], venv_dir: Optional[Path]
 ) -> list[Path]:
-    """按优先级列出启动解释器，并保留 venv 的 Python 启动器软链接。"""
+    """按优先级列出项目专用入口、venv 解释器和外部启动解释器。"""
     candidates: list[Path] = []
     seen: set[str] = set()
 
+    resolved_venv_dir = (venv_dir or (ROOT / "venv")).expanduser().resolve()
+    venv_bin_dir = get_venv_bin_dir(resolved_venv_dir)
+    project_runtime_python = venv_bin_dir / (
+        "moviepilot-python.exe" if os.name == "nt" else "moviepilot-python"
+    )
     raw_candidates = [
+        project_runtime_python,
+        get_venv_python(resolved_venv_dir),
         runtime_python,
-        get_venv_python((venv_dir or (ROOT / "venv")).expanduser().resolve()),
         Path(sys.executable) if sys.executable else None,
     ]
     for candidate in raw_candidates:
@@ -3783,6 +3806,7 @@ def _git_output(*args: str) -> str:
 
 
 def _ensure_git_clean() -> None:
+    """检查源码工作树，并在用户确认后清除已跟踪的本地改动。"""
     status = _git_output("status", "--porcelain", "--untracked-files=no")
     if not status.strip():
         return
@@ -3800,9 +3824,18 @@ def _ensure_git_clean() -> None:
             preview += " 等"
         detail = f"：{preview}"
 
-    raise RuntimeError(
-        f"检测到当前仓库有未提交的源码改动{detail}，请先提交或清理后再执行更新。"
-    )
+    try:
+        confirmed = _prompt_yes_no(
+            f"检测到当前仓库有未提交的源码改动{detail}，是否清空本地改动并继续更新",
+            default=False,
+        )
+    except (EOFError, OSError) as exc:
+        raise RuntimeError("当前终端不支持交互确认，已取消更新。") from exc
+    if not confirmed:
+        raise RuntimeError("已取消更新，未清理本地源码改动。")
+
+    print_step("清理本地已跟踪源码改动")
+    run(["git", "reset", "--hard", "HEAD"], cwd=ROOT)
 
 
 def _update_backend_ref(ref: str, *, fetch: bool = True) -> str:
@@ -3975,6 +4008,10 @@ def build_parser() -> argparse.ArgumentParser:
     install_parser.add_argument(
         "--config-dir", help="配置目录，默认使用程序目录外的系统配置目录"
     )
+
+    cjk_parser = subparsers.add_parser("install-cjk", help="补装并验证 Agent 中文全文索引扩展")
+    cjk_parser.add_argument("--venv", default=str(ROOT / "venv"), help="目标虚拟环境目录")
+    cjk_parser.add_argument("--check", action="store_true", help="只验证已安装扩展，不编译或修改文件")
 
     frontend_parser = subparsers.add_parser(
         "install-frontend", help="下载前端 release 并安装本地运行时"
@@ -4202,6 +4239,10 @@ def main() -> int:
     )
 
     try:
+        if args.command == "install-cjk":
+            install_cjk(get_venv_python(Path(args.venv).expanduser().absolute()), check=args.check)
+            return 0
+
         if args.command == "install-deps":
             venv_python = install_deps(
                 python_bin=args.python,

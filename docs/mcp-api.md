@@ -142,7 +142,7 @@ MCP 当前不会主动发送工具列表变更通知（`listChanged=false`）。
 | :--- | :--- | :--- |
 | `moviepilot_api` | MoviePilot 产品业务 API：媒体、搜索、订阅、下载、整理、站点、存储、调度、工作流、插件、过滤规则和系统配置 | `skills/moviepilot-api/SKILL.md` 及其 `api/<category>.md` 独立分类合同；运行时 schema 为 `app/agent/policy/resources/api_mcp_schema.json` |
 | `downloader_operation` | qBittorrent、Transmission、rTorrent 原生任务、队列、文件、限速、标签和会话操作 | `skills/downloader-operation/SKILL.md` 与 `skills/downloader-operation/scripts/mp-downloader.py` 的 `ACTIONS` |
-| `mediaserver_operation` | Emby、Jellyfin、Plex、ZSpace、UGREEN、TrimeMedia、Navidrome、MediaVault 原生媒体库、搜索、播放、扫描和刷新操作 | `skills/mediaserver-operation/SKILL.md` 与 `skills/mediaserver-operation/scripts/mp-mediaserver.py` 的 `ACTIONS` |
+| `mediaserver_operation` | Emby、Jellyfin、Plex、ZSpace、UGREEN、TrimeMedia、Navidrome、Vyo 原生媒体库、搜索、播放、扫描和刷新操作 | `skills/mediaserver-operation/SKILL.md` 与 `skills/mediaserver-operation/scripts/mp-mediaserver.py` 的 `ACTIONS` |
 | `database_operation` | MoviePilot 配置数据库表清单、实时 schema、只读 SQL 和明确授权写入 | `skills/database-operation/SKILL.md` 与 `skills/database-operation/scripts/mp-db.py` 的 `ACTIONS` |
 
 这四个工具都要求管理员级 MCP 集成身份；`tools/list` 的可见性不等于绕过业务权限或写操作确认。下载器和媒体服务器工具会在一次调用内自动选择默认/唯一实例；实例不明确时，错误结果会列出可复用的精确实例名。数据库工具不接受任意连接串或凭据，脚本从 MoviePilot 运行时配置读取数据库连接。
@@ -866,6 +866,12 @@ MCP、HTTP 工具管理接口、本地 CLI 和内置 Agent 都从同一严格目
 
 `run`、pipe 和 PTY 共享 `cwd/shell/login`：默认及相对 `cwd` 使用 MoviePilot 根目录，
 POSIX 默认非登录；Windows 未指定时保留已有解释器/UTF-8 策略。回包包含实际 `shell/login`。
+项目安装目录存在 `venv`，或 Docker 的 `VENV_PATH` 环境存在时，三种模式都会把该环境的
+`bin`（Windows 为 `Scripts`）放在子进程 `PATH` 最前、设置 `VIRTUAL_ENV`，并让裸
+`python`/`python3` 使用项目专用入口 `moviepilot-python`；入口不存在时回退到环境中的标准
+Python。执行 Python 应直接使用 `python -m ...`，尤其是下载器、SMB、媒体服务器等需要系统
+权限的操作。安装依赖优先使用项目 `uv pip ...` 或绑定环境中的 `python -m pip ...`，不要改用
+系统解释器或 `sudo pip`。
 `write(close_stdin=true)` 仅在 pipe 模式支持末段输入后 EOF，回包包含 `stdin_closed`；输出可继续读取。
 PTY 会在写入之前拒绝 half-close，空 `write` 不代表 EOF，控制字节在 pipe 中也不等于信号。
 新增 `interrupt` 只发送一次平台支持的中断并返回 `signal/signal_sent`，不会升级强杀；
