@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 42
+version: 43
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -78,6 +78,11 @@ only `operation_id`, `path_params`, `query`, and `body`. The host chooses the
 fixed HTTP method and path, creates the current user's authentication token,
 applies authorization and confirmation policy, and returns the API response.
 
+The gateway connects directly to the local backend listener using `HOST` and
+`PORT`, bypassing environment proxies. `APP_DOMAIN` is for public URLs such as
+Passkey origins and is not the gateway base URL. Keep it configured even when
+the public reverse proxy is unreachable from inside the container.
+
 `subscription.add`, `subscription.update`, and `subscription.delete` require
 authorization for the action and scope and use the active MoviePilot user bound to the channel account,
 including for channel administrators. Creation belongs to that user; ordinary
@@ -89,11 +94,6 @@ This file is intentionally kept as the routing and execution guide. Detailed
 operation contracts live in the linked category files under `api/`; load only
 the one category file needed for the selected operation. Do not load every
 category file by default.
-
-When updating `LLM_TEMPERATURE` through `config.system.update`, use `null` to
-clear it and use the provider default (the model-specific SDK default for the
-native Google runtime). An explicit `0` is a
-real temperature value, not a request to clear the setting.
 
 Never provide a URL, method, authentication header, API key, or access token.
 Never fall back to a retired tool name or `moviepilot tool` MCP command. If an
@@ -167,7 +167,7 @@ Use the category contracts and frontmatter allowlist as the operation source of 
 | Filter | [api/filter.md](api/filter.md) | `filter.*` | built-in/custom rules, groups, and testing |
 | Library | [api/library.md](api/library.md) | `library.*` | existence and latest-media checks |
 | Media | [api/media.md](api/media.md) | `media.*` | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
-| Music | [api/music.md](api/music.md) | `music.*` | recognition, exploration, albums, artists, and cache administration |
+| Music | [api/music.md](api/music.md) | `music.*` | recognition, exploration, albums, artists, text normalization, edition precedence, and cache administration |
 | Plugin | [api/plugin.md](api/plugin.md) | `plugin.*` | plugin market, install/runtime, configuration, source, folders, ratings, releases, and statistics |
 | Recommendation | [api/recommendation.md](api/recommendation.md) | `recommendation.*` | recommendation listings |
 | Scheduler | [api/scheduler.md](api/scheduler.md) | `scheduler.*` | scheduler listing, progress, and execution |

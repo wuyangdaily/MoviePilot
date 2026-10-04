@@ -567,6 +567,12 @@ AniList 榜单、探索、详情、人物和推荐接口优先通过 `anilist-ch
 标题、副标题的实际解析，不用目标媒体回填证据；`title_aliases`、`album_aliases`、
 `artist_aliases` 分别保留同一实体的可信别名及展示转简体前的原文。
 
+`MUSIC_METADATA_TO_SIMPLIFIED` 同样适用于同步/异步专辑详情及其逐曲文本，
+也适用于音乐整理最终命名：完整本地标签、手选专辑发行版和手选录音均按开关转换。
+转换不改写原始音频标签、来源缓存、歌词或媒体身份；关闭开关保留原文。
+录音身份不等同于专辑发行身份，单曲仍保留已有的本地专辑字段优先级；
+多艺人署名完整保留，不自动截取第一位艺人。
+
 音乐元数据、单曲和专辑模型还分别保留 `composers`、`conductors`、`orchestras` 人名列表，
 以及 `performers` 乐器/声部到人名列表的映射（未指定乐器使用 `performer` 键）。
 这些字段不会混入主艺人或艺人别名；空字段在简化卡片中省略，完整模型与旧缓存兼容。
@@ -855,6 +861,11 @@ MCP、HTTP 工具管理接口、本地 CLI 和内置 Agent 都从同一严格目
 `url/title/screenshot_base64/format/note` 并用 `success/execution_outcome` 明确状态。
 内置 Agent 在专用格式化路径把成功截图转换为图像输入，外部 HTTP/MCP 客户端仍按
 原 JSON 合同消费；本次不宣称外部 MCP 已提供原生 image content block。
+`screenshot` 可选传入 `selector`，在原浏览器会话中截取唯一匹配的可见元素；省略时仍截取
+当前视口。两种截图遵守相同的格式、字节和像素上限，元素不存在或匹配多个时返回失败。
+`recognize_captcha` 的成功字段保持不变；OCR 无结果或服务异常时仍返回 `success=false`、
+空 `captcha_text`，并增加 `recovery`，提示内置 Agent 先截取当前验证码供多模态识别。
+URL 安全校验拒绝不提供绕过式恢复指引，截图或 OCR 成功也不代表网站已接受验证码。
 
 `view_image` 只供内置 Agent 使用：它会在 Agent 专用格式化路径把 URL、本地图片或图片内容转换为
 原生图像输入，HTTP/MCP 直调不提供该工具，避免把只能由视觉中间件消费的图像块误当作普通 JSON。
@@ -916,6 +927,9 @@ SDK method。普通 MCP 客户端如需这些 provider 原生能力，应使用�
 宿主按 `operation_id` 决定固定 method 与 path，使用真实持久化管理员身份为
 API KEY 集成签发短期本机令牌，并按 operation 执行权限、确认、结果脱敏和恢复策略。
 调用方不能注入 host、URL、认证头或 API Token。
+网关按后端监听配置 `HOST` / `PORT` 通过 HTTP 直连本机 API，并绕过环境代理。
+`0.0.0.0` / `::` 通配监听分别使用 `127.0.0.1` / `::1` 回环地址，显式 IPv6 地址按 URL 规范加方括号。
+`APP_DOMAIN` 用于 Passkey 等对外地址，不作为网关基址；反代域名在容器内不可达时无需清空该配置。
 通知渠道的 `subscription.add`、`subscription.update`、`subscription.delete` 使用渠道账号绑定的
 有效 MoviePilot 用户身份，渠道管理员也不会借用超级管理员身份。创建时订阅归属绑定用户，
 普通用户只能修改或删除自己的订阅；未绑定或绑定用户已停用时拒绝执行。三项操作仍保留确认机制。

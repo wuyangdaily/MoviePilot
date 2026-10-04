@@ -941,8 +941,8 @@
       "runtime_only": true
     }
   },
-  "edge_count": 9297,
-  "edge_sha256": "1dcc315022161e9e9cd4a7e83546755c776ea932c5c85b3c8df25052173c8957",
+  "edge_count": 9300,
+  "edge_sha256": "8f47b7d4f63b473306a741bd791077c4d88986061a3f182ded3ab7389c709d2d",
   "edges": [
     "app -> app.foundation",
     "app -> app.foundation.environment",
@@ -3717,6 +3717,7 @@
     "app.application.messaging.message -> app.foundation.crypto",
     "app.application.messaging.message -> app.foundation.singleton",
     "app.application.messaging.message -> app.foundation.size",
+    "app.application.messaging.message -> app.foundation.text",
     "app.application.messaging.message -> app.runtime",
     "app.application.messaging.message -> app.runtime.cache",
     "app.application.messaging.message -> app.runtime.log",
@@ -4258,6 +4259,8 @@
     "app.application.transfer.checkpoint -> app.application",
     "app.application.transfer.checkpoint -> app.application.classification",
     "app.application.transfer.checkpoint -> app.application.classification.reference",
+    "app.application.transfer.execution -> app.schemas",
+    "app.application.transfer.execution -> app.schemas.exception",
     "app.application.transfer.history -> app.application",
     "app.application.transfer.history -> app.application.classification",
     "app.application.transfer.history -> app.application.classification.reference",
