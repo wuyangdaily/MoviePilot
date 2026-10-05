@@ -422,7 +422,7 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 | GET | `/api/v1/media/recognize` | 识别标题，参数：`title`、`subtitle`、`custom_words`，可选 `media_source`；当 `title` 为含目录的媒体文件路径时，会合并父目录中的名称、年份等信息 |
 | GET | `/api/v1/media/recognize_file` | 识别文件路径，参数：`path`，可选 `media_source` |
 | GET | `/api/v1/media/{media_id}` | 按原生 ID 查询影视或音乐详情；必填参数：`media_source`、`type_name`，其中 `media_source` 与路径中的 `media_id` 组成统一媒体身份，`type_name` 支持电影、电视剧和音乐 |
-| POST | `/api/v1/media/scrape/{storage}` | 刮削媒体元数据；请求体为 `FileItem`，可选查询参数 `media_source`、`media_id`、`type_name`（电影/电视剧/音乐）和 TMDB `episode_group`。剧集组用于指定电视剧的季集顺序；音乐会按策略处理音频标签、封面和歌词 |
+| POST | `/api/v1/media/scrape/{storage}` | 刮削媒体元数据；请求体为 `FileItem`，可选查询参数 `media_source`、`media_id`、`type_name`（电影/电视剧/音乐）和 TMDB `episode_group`。剧集组用于指定电视剧的季集顺序；音乐会按策略处理音频标签、封面和歌词。会覆盖目标位置已有的图片、NFO 和音频标签，与文件管理、手动整理一样需要管理权限 |
 | POST | `/api/v1/transfer/manual/target-path` | 按源文件与目录配置匹配手动整理目标路径；请求体为 `ManualTransferItem`，该接口不执行媒体识别 |
 | POST | `/api/v1/transfer/manual/history` | 查询文件、批量文件或目录命中的成功整理历史摘要，用于进入手动整理界面时显示重新整理状态 |
 | POST | `/api/v1/transfer/manual` | 手动整理；请求体可用 `media_source` + `media_id` 指定本次识别与刮削数据源；`logids` 会先还原为同一个显式文件批次，多首音乐因而共享专辑识别上下文；音乐请求未传 `music_type` 时，目录按 `album`、文件按 `recording` 解释；使用 `music_type=album` 和 MusicBrainz 发行组 `media_id` 时，可另传 `musicbrainz_release_id`（Release UUID）明确选定发行版；后端核验该版属于该发行组，失败不改用默认版；`GET /api/v1/music/album/{album_id}` 接受同名可选查询参数用于预先核对该版曲目；预览与执行须保持相同 ID 和文件范围；可用最多三项的 `music_release_regions`（ISO 3166-1）和 `music_release_scripts`（ISO 15924）仅覆盖本次 MusicBrainz 发行版本排序，省略时继承系统设置；命中持久失败历史，且未指定媒体身份、未开启 `reorganize` 时，由调度器重试原计划（包括 `logid` 历史入口）；显式重整先校验并放弃确定失败任务，再清理旧目标和记录；旧版失败历史仍清理后重试；`reorganize=true` 时清理命中的成功历史和非移动模式旧目标后重新整理 |
@@ -623,7 +623,12 @@ SSE 的 `candidate_items` 是站点原始返回数量，`match_counts` 记录身
 `field_sources` 按字段记录 `tag`、`album_tags`、`stream`、`filename`、`directory`、`torrent`、
 `remote` 或 `manual` 等来源，缺失表示来源未记录；该说明不等于远端身份已验证，也不用于绕过整理准入。
 
-有效 CUE 可补充专辑和逐轨信息，相关字段来源为 `cue`。`music_layout=image_cue` 表示
+`MUSIC_CUE_ENABLE` 默认开启，可在“设置 → 系统 → 高级设置 → 媒体 → 音乐 CUE 识别”关闭。
+已分轨专辑附带错误 CUE 时，关闭后重新预览或重新提交整理，系统只按音频标签和文件名识别，
+不读取、校验或自动归档 CUE。此全局开关同时适用于自动整理、手动预览和实际整理，
+切换后不会复用另一种模式的专辑识别缓存；已经生成的整理计划不会自动改写。整轨专辑应保持开启。
+
+开启时，有效 CUE 可补充专辑和逐轨信息，相关字段来源为 `cue`。`music_layout=image_cue` 表示
 一个音频文件包含多个逻辑音轨，`music_type=album`，不使用开头的 Recording 指纹替代整张专辑。
 整轨归档会保留音频及 `cue_filename` 的原名，只规范专辑目录，避免破坏 `FILE` 引用；不自动切轨。
 `cue_tracks` 保留逻辑曲目及每秒 75 帧的索引。`tracks_cue` 的分轨索引仅辅助元数据，
@@ -743,7 +748,7 @@ AMLL 使用无需鉴权的原生搜索与获取接口，先尝试 ISRC，再核�
 | GET | `/api/v1/dashboard/schedule` | 查询所有后台定时服务，包含当前完成百分比、进度文本和执行状态 |
 | GET | `/api/v1/dashboard/schedule/{job_id}/progress` | 查询指定后台定时服务的实时进度详情 |
 | GET | `/api/v1/dashboard/schedule2/{job_id}/progress` | 使用 API_TOKEN 查询指定后台定时服务的实时进度详情 |
-| GET | `/api/v1/system/setting/public/{key}` | 登录用户读取白名单内非敏感系统设置，仅支持目录、存储、站点范围、默认订阅规则、Follow 订阅者和插件市场地址等前端必需配置 |
+| GET | `/api/v1/system/setting/public/{key}` | 登录用户读取白名单内非敏感系统设置，仅支持目录、存储、站点范围、默认订阅规则、Follow 订阅者和插件市场地址等前端必需配置；存储只返回 `name` 和 `type`，与 `/api/v1/storage/options` 一致，不含连接配置 |
 | POST | `/api/v1/system/setting/PLUGIN_MARKET/sync-wiki` | 管理员从 MoviePilot Wiki 的插件文档同步公开插件仓库清单，和本地 `PLUGIN_MARKET` 合并去重后写入配置 |
 | GET | `/api/v1/system/module-catalog` | 查询宿主模块及其服务类型目录，供前端选择器构造选项 |
 | GET | `/api/v1/system/modulelist` | 查询已启用模块，保留 `name` 原始中文字段，并提供 `name_i18n` 和 `name_key` 给多语言前端展示 |
@@ -793,6 +798,16 @@ TMDB 缓存查询响应的 `data` 包含 `count`、`recognized`、`unrecognized`
 影视身份未命中且提供 `mtype`、`title` 时，会按类型、规范标题和可选季号跨来源查找；
 有年份时优先精确年份，其次匹配订阅年份为空的未定档媒体；没有年份时只匹配年份也为空的订阅。
 音乐订阅始终只按媒体身份查询。
+
+### 订阅可选设置清空
+
+`PUT /api/v1/subscribe/`（`subscription.update`）只更新显式提交的字段，省略字段保留原值。
+`custom_words`、`keyword`、`save_path`、`episode_group`、`downloader`、
+`min_bitrate`、`min_bit_depth`、`min_sample_rate` 与筛选字段
+`filter`、`include`、`exclude`、`quality`、`resolution`、`effect`、`audio_quality`、`audio_format`
+均可通过 `null` 清空，也兼容表单提交的空字符串 `""`；清空会实际覆盖数据库旧值。
+非空字符串不自动裁剪，数值 `0` 保留。此规则不扩展到名称、类型、季号、总集数等字段，
+媒体身份仍要求 `media_source` 与 `media_id` 成对提交。
 
 ### 单条订阅搜索周期
 

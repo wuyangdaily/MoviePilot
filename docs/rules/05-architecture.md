@@ -66,6 +66,7 @@ to make the directory tree look symmetrical.
 | `app/application/download/` | Download task querying/control and selection use cases; `failures.py` owns the frozen failure-cooldown write/query DTOs and persistence Port |
 | `app/application/history/` | History use cases and persistence contracts; DownloadHistory and TransferHistory own deeply frozen DTOs plus typed query/write/staging ports |
 | `app/application/music/` | 多来源音乐目录编排；`observation.py` 沿用站点搜索的调用观察模式，隔离一次音乐识别的结果、候选摘要与请求/等待预算，不持有来源客户端、不改变旧模块返回合同；`recognition.py` 通过注入来源回调串行回退、汇总诊断，并按领域候选计划有界补充真实Artist身份别名，子来源共享祖先预算，`catalog.py` 声明目录查询所需的最小来源 Port |
+| `app/application/audio.py` | 本地音频标签与 CUE 证据读取；通过 `runtime.settings` 读取 `MUSIC_CUE_ENABLE`，保持宿主启动前的独立读取能力。Chain 专辑缓存通过配置快照隔离 CUE 模式；Domain CUE 解析器保持无配置依赖 |
 | `app/application/messaging/message.py` | 模板上下文按既有来源优先级选定音乐字段后，使用配置快照和 `app.foundation.text.convert` 应用简体开关；不调用识别 Chain、不改写标签或来源缓存，也不替换录音所属发行和多艺人署名 |
 | `app/application/chain/` | Injectable Chain runtime capabilities: `context.py` owns the typed runtime and persistence dependency aggregate, and `events.py` owns durable event write contracts plus replayable payload conversion |
 | `app/application/agent.py` | Agent orchestration facade and typed `AgentDataContext`; startup injects one explicit data context into the manager, memory, tool and scheduler owners without a process-wide persistence locator |
@@ -430,7 +431,7 @@ mentions media, site or torrent:
 | Classification | `classification/fields.py` owns the standard field and operator catalog; `classification/sources.py` owns fixture-verified built-in source capability levels; `classification/facts.py` owns canonical fact construction and cross-source country/genre normalization; `classification/evaluator.py` owns deterministic condition and policy evaluation; `classification/validation.py` owns publish-time structural and semantic validation. The package consumes only normalized classification schemas and facts, never concrete media-source modules or persisted configuration |
 | Recognition | `metainfo.py`, `meta/` and `tokens.py` parse names, paths, release groups, streaming platforms, anime, video and music metadata |
 | Site | `site.py` owns site-domain exceptions and interprets HTML into business states such as logged-in and checked-in; configured catalog/auth/index resources stay in `app/application/site/`, generic URL/DOM parsing stays in foundation and network access stays in adapters |
-| Torrent | `domain/torrent.py` owns magnet-link semantics; configured download/file behavior stays in `application/torrent/download.py`, while cache recognition stays in `application/torrent/cache.py` |
+| Torrent | `domain/torrent.py` owns magnet-link semantics, site-scoped resource identity and timestamp/signature URL recognition; configured download/file behavior stays in `application/torrent/download.py`, while cache recognition stays in `application/torrent/cache.py` |
 
 `app/domain` may depend only on schemas and foundation. It must not read global
 settings, access DB/network/filesystem adapters, import Rust, discover services
@@ -654,6 +655,12 @@ implements only `_interaction_handler`; it must not re-export application-layer
 interaction managers.
 
 Download orchestration is owned by the same-named `app.chain.download` package.
+种子缓存刷新按 `domain/torrent.py` 的站点和稳定种子身份更新访问参数；标题、副标题未变时
+保留已有识别结果，缺少稳定 ID 的历史资源沿用标题去重。下载链对带 `t` / `sign` 的普通
+HTTP 地址发生 401/403/404/410 时，通过现有站点索引器搜索一次，只接受同站同种子的新地址，
+最多重试一次，再沿用原失败通知与冷却流程；不推断签名 TTL，也不清除既有资源失败记录。
+`NO_CACHE_SITE_KEY` 默认留空，馒头同样采用增量缓存，下载时仍按已有协议逐次换票。
+显式配置的站点关键字继续作为不缓存的例外，空白项不匹配任何站点。
 Its root lazily exposes only the stable `DownloadChain`; `facade.py` composes the
 owner classes and keeps the `DownloadFileDeleted` event wrapper on that stable
 class identity. Selection, submission, batch execution, existence checks, failure

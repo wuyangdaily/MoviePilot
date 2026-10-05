@@ -337,7 +337,7 @@ def incoming_verify(
     微信/VoceChat等验证响应
     """
     logger.info(
-        f"收到验证请求: token={token}, echostr={echostr}, "
+        f"收到验证请求: echostr={echostr}, "
         f"msg_signature={msg_signature}, timestamp={timestamp}, nonce={nonce}"
     )
     if echostr and msg_signature and timestamp and nonce:
@@ -367,10 +367,10 @@ async def subscribe(
 )
 def send_notification(
     payload: _SchemaSubscriptionMessage,
-    _: _SchemaTokenPayload = Depends(verify_token),
+    _: ApiPrincipal = Depends(get_current_active_superuser),
 ):
     """
-    发送webpush通知
+    发送webpush通知；会推送到全部已订阅浏览器，因此仅限超级管理员调用
     """
     from app.adapters.network.webpush import WebPushDeliveryError, send_webpush
 

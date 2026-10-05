@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 43
+version: 44
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -90,6 +90,10 @@ users may update or delete only their own subscriptions. An unbound or inactive
 channel user must bind an active account before retrying, not switch to an
 administrator identity.
 
+For `subscription.update`, omit settings that should stay unchanged. Send JSON
+`null` to clear a supported optional setting; see [Subscription APIs](api/subscription.md)
+for the exact fields and the form empty-string compatibility rule.
+
 This file is intentionally kept as the routing and execution guide. Detailed
 operation contracts live in the linked category files under `api/`; load only
 the one category file needed for the selected operation. Do not load every
@@ -167,7 +171,7 @@ Use the category contracts and frontmatter allowlist as the operation source of 
 | Filter | [api/filter.md](api/filter.md) | `filter.*` | built-in/custom rules, groups, and testing |
 | Library | [api/library.md](api/library.md) | `library.*` | existence and latest-media checks |
 | Media | [api/media.md](api/media.md) | `media.*` | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
-| Music | [api/music.md](api/music.md) | `music.*` | recognition, exploration, albums, artists, text normalization, edition precedence, and cache administration |
+| Music | [api/music.md](api/music.md) | `music.*` | recognition, CUE handling, exploration, albums, artists, text normalization, edition precedence, and cache administration |
 | Plugin | [api/plugin.md](api/plugin.md) | `plugin.*` | plugin market, install/runtime, configuration, source, folders, ratings, releases, and statistics |
 | Recommendation | [api/recommendation.md](api/recommendation.md) | `recommendation.*` | recommendation listings |
 | Scheduler | [api/scheduler.md](api/scheduler.md) | `scheduler.*` | scheduler listing, progress, and execution |

@@ -406,6 +406,8 @@ class ConfigModel(BaseModel):
     ACOUSTID_API_KEY: str = "b1auxfOzAg"
     # 是否将识别到的音乐标题、艺术家、专辑等标准元数据转换为简体中文
     MUSIC_METADATA_TO_SIMPLIFIED: bool = True
+    # 是否读取关联 CUE；已分轨音频可关闭以忽略错误索引，整轨专辑应保持开启
+    MUSIC_CUE_ENABLE: bool = True
     # MusicBrainz 发行地区优先级，按 ISO 3166-1 两位代码从高到低排列
     MUSIC_RELEASE_REGION_PRIORITY: str = "CN,TW,HK"
     # MusicBrainz 发行文字字形优先级，按 ISO 15924 四位代码从高到低排列
@@ -553,8 +555,8 @@ class ConfigModel(BaseModel):
     SITEDATA_REFRESH_INTERVAL: int = 6
     # 读取和发送站点消息
     SITE_MESSAGE: bool = True
-    # 不能缓存站点资源的站点域名，多个使用,分隔
-    NO_CACHE_SITE_KEY: str = "m-team"
+    # 不缓存站点资源的域名关键字，多个使用,分隔；留空时所有站点使用缓存
+    NO_CACHE_SITE_KEY: str = ""
     # OCR服务器地址，用于识别站点验证码
     OCR_HOST: str = "https://movie-pilot.org"
     # 仿真类型：cloakbrowser 或 flaresolverr，其他值按 cloakbrowser 处理
@@ -815,6 +817,8 @@ class ConfigModel(BaseModel):
     AI_AGENT_GLOBAL: bool = False
     # 是否隐藏前端全局智能体入口
     AI_AGENT_HIDE_ENTRY: bool = False
+    # 内置智能助手输出语言，默认使用简体中文
+    AI_AGENT_OUTPUT_LANGUAGE: str = "zh-CN"
     # LLM提供商（支持内置 provider，以及从 models.dev 动态补充的平台）
     LLM_PROVIDER: str = "deepseek"
     # LLM模型名称
