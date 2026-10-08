@@ -53,6 +53,11 @@ MCP 当前不会主动发送工具列表变更通知（`listChanged=false`）。
 
 `execute_code` 仅在已绑定宿主会话的管理员 Agent 中提供，不发布到外部 HTTP/MCP 工具目录。内部只读 RPC 仍经过同一个 API/Skill/身份边界，默认直接执行，不要求用户逐次确认；外部客户端不能通过直接调用为自己创建 Python 会话身份。持久状态和回收语义见 [Python 只读工具编排](agent.md#python-只读工具编排)。
 
+内置 Agent 通过渠道调用业务 API 时，QQ 的 `qq_userid` / `qq_openid`、飞书的
+`feishu_userid` / `feishu_openid` 都是候选绑定字段，任一字段与当前渠道标识一致即可
+解析到对应的启用用户，无需将两个字段填成相同值。同一标识命中多个启用用户时拒绝归属；
+停用或未绑定用户仍无法调用需要用户身份的业务 API。
+
 ### 插件实例日志等级
 
 `plugin.loglevel.get` 使用源插件 ID 查询，返回该插件全部实例（首项固定是本体自身，其后
@@ -625,8 +630,13 @@ SSE 的 `candidate_items` 是站点原始返回数量，`match_counts` 记录身
 
 `MUSIC_CUE_ENABLE` 默认开启，可在“设置 → 系统 → 高级设置 → 媒体 → 音乐 CUE 识别”关闭。
 已分轨专辑附带错误 CUE 时，关闭后重新预览或重新提交整理，系统只按音频标签和文件名识别，
-不读取、校验或自动归档 CUE。此全局开关同时适用于自动整理、手动预览和实际整理，
-切换后不会复用另一种模式的专辑识别缓存；已经生成的整理计划不会自动改写。整轨专辑应保持开启。
+不读取、校验或自动归档 CUE。全局开关作为自动整理与手动整理的默认值。
+手动整理弹窗提供“本次识别 CUE”，默认采用系统设置，可直接覆盖本次预览、立即整理和队列整理，
+不修改全局设置。`POST /api/v1/transfer/manual` 接受 `music_cue_enable: boolean | null`，
+省略或 `null` 继承全局值；`false` 忽略 CUE，`true` 启用 CUE。
+预览和执行应传相同选择。专辑缓存按本次有效策略隔离，任务准入快照会保留该值，
+后台执行、重启恢复和原计划重试不会改用后来变更的全局值；已经生成的计划不会自动改写。
+整轨专辑应保持开启。
 
 开启时，有效 CUE 可补充专辑和逐轨信息，相关字段来源为 `cue`。`music_layout=image_cue` 表示
 一个音频文件包含多个逻辑音轨，`music_type=album`，不使用开头的 Recording 指纹替代整张专辑。
@@ -716,15 +726,15 @@ AMLL 使用无需鉴权的原生搜索与获取接口，先尝试 ISRC，再核�
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/download/` | 查询正在下载的任务，参数：`name`；关联下载历史时返回媒体类型、来源站点 `site_name`，以及 `media.poster` 海报和 `media.backdrop` 背景图；兼容字段 `media.image` 与 `media.poster` 相同 |
-| POST | `/api/v1/download/` | 添加含媒体信息的下载任务，请求体包含媒体信息和种子信息 |
-| POST | `/api/v1/download/add` | 添加不含媒体信息的下载任务，请求体包含 `torrent_in`，可选且必须成对提供 `media_source` + `media_id`，并支持 `music_type`、`downloader`、`save_path`；影视或音乐识别失败时统一响应 `data.requires_confirmation=true`，用户确认后可用 `allow_unrecognized=true` 重试本次下载 |
-| POST | `/api/v1/download/subtitle` | 下载字幕到识别出的媒体下载目录，请求体包含 `subtitle_in`，并必须提供 `media_source` + `media_id`；可选 `save_path` |
+| POST | `/api/v1/download/` | 添加含媒体信息的下载任务，请求体包含媒体信息和种子信息；可选 `downloader`、`save_path`，`save_path` 可为路径，或与已配置下载目录名称完全一致的别名 |
+| POST | `/api/v1/download/add` | 添加不含媒体信息的下载任务，请求体包含 `torrent_in`，可选且必须成对提供 `media_source` + `media_id`，并支持 `music_type`、`downloader`、`save_path`（路径，或与已配置下载目录名称完全一致的别名）；影视或音乐识别失败时统一响应 `data.requires_confirmation=true`，用户确认后可用 `allow_unrecognized=true` 重试本次下载 |
+| POST | `/api/v1/download/subtitle` | 下载字幕到识别出的媒体下载目录，请求体包含 `subtitle_in`，并必须提供 `media_source` + `media_id`；可选 `save_path`（路径，或与已配置下载目录名称完全一致的别名） |
 | GET | `/api/v1/download/start/{hashString}` | 恢复下载任务，参数：`name` |
 | GET | `/api/v1/download/stop/{hashString}` | 暂停下载任务，参数：`name` |
 | PATCH | `/api/v1/download/{hashString}` | 高级更新下载任务，可修改限速、标签、Tracker、保存目录和下载器分类 |
 | POST | `/api/v1/download/{hashString}/classify-source` | `recognize` 模式重新识别媒体并按当前生效分类计算保存位置，`manual` 模式使用明确目标目录；`execute=false` 只预览，`execute=true` 由下载器移动任务数据；可传当前策略中已启用的 `media_category` 路径覆盖自动分类 |
 | GET | `/api/v1/download/clients` | 查询可用下载器 |
-| GET | `/api/v1/download/paths` | 查询可用于下载接口 `save_path` 参数的下载路径 |
+| GET | `/api/v1/download/paths` | 查询可用于下载接口 `save_path` 参数的下载路径，返回项的非空 `name` 也可直接作为 `save_path` 提交 |
 | DELETE | `/api/v1/download/{hashString}` | 删除下载任务，参数：`name` |
 
 资源目录重新分类只接受仍存在于下载器且具有可恢复媒体类型的下载历史任务；识别模式可复用历史中的媒体来源和同来源媒体 ID，也可在请求中指定来源、媒体 ID 或当前策略中已启用且媒体类型匹配的 `media_category`。
@@ -808,6 +818,8 @@ TMDB 缓存查询响应的 `data` 包含 `count`、`recognized`、`unrecognized`
 均可通过 `null` 清空，也兼容表单提交的空字符串 `""`；清空会实际覆盖数据库旧值。
 非空字符串不自动裁剪，数值 `0` 保留。此规则不扩展到名称、类型、季号、总集数等字段，
 媒体身份仍要求 `media_source` 与 `media_id` 成对提交。
+
+订阅的 `save_path` 同样接受与已配置下载目录名称完全一致的别名；该值按原样保存，到触发下载时才解析为目录根路径，目录被重命名后会以「未找到名为…的下载目录」失败。
 
 ### 单条订阅搜索周期
 
@@ -1159,3 +1171,7 @@ description、aliases、instructions，或通过 `append_instructions` 追加规
 `options` 提供来源无关的 `{value, label}`，`source_options` 按数据源 ID 提供开放候选。国家与语言显示中文名称，规则保存标准代码；风格保存与分类事实归一化共用的稳定键。来源风格和音乐枚举保留原始大小写。
 
 客户端合并通用选项和所选来源的候选；未限制来源时展示全部候选并标注来源。`allow_custom_values` 为真时允许输入其他值，切换来源不得清空已有条件。`source_options` 缺失等价于空目录；候选是录入辅助，不改变来源支持等级或规则校验范围。公司、平台和用户标签等开放字段应使用媒体预览中的原值。
+
+## Web 手动分页
+
+`/api/v1/search/title/stream` 与 `/api/v1/search/media/{media_id}/stream` 新增可选参数 `manual_paging`、`page`、`source`。`manual_paging=true` 时每个来源只返回指定的一页，`replace`/`done` 事件附带各来源的 `source`、`site_name`、`page`、`can_continue`、`error`。不传该参数时行为不变，Agent `search.*` operation 不受影响。完整规则及订阅补全搜索策略 `SubscribeSearchStrategy` 见 [订阅补全搜索与手动分页](smart-search.md)。

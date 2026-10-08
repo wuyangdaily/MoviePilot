@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 44
+version: 46
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -90,6 +90,12 @@ users may update or delete only their own subscriptions. An unbound or inactive
 channel user must bind an active account before retrying, not switch to an
 administrator identity.
 
+For QQ, either `qq_userid` or `qq_openid` may match the current channel ID; for
+Feishu, either `feishu_userid` or `feishu_openid` may match. A single matching
+field is sufficient, but the match must identify exactly one active MoviePilot
+user across all candidate fields. Do not copy an openid into the userid field
+as a workaround or bypass an ambiguous binding.
+
 For `subscription.update`, omit settings that should stay unchanged. Send JSON
 `null` to clear a supported optional setting; see [Subscription APIs](api/subscription.md)
 for the exact fields and the form empty-string compatibility rule.
@@ -171,7 +177,7 @@ Use the category contracts and frontmatter allowlist as the operation source of 
 | Filter | [api/filter.md](api/filter.md) | `filter.*` | built-in/custom rules, groups, and testing |
 | Library | [api/library.md](api/library.md) | `library.*` | existence and latest-media checks |
 | Media | [api/media.md](api/media.md) | `media.*` | media search/detail, recognition, scraping, schedules, sources, people, seasons, and classification |
-| Music | [api/music.md](api/music.md) | `music.*` | recognition, CUE handling, exploration, albums, artists, text normalization, edition precedence, and cache administration |
+| Music | [api/music.md](api/music.md) | `music.*` | recognition, global and per-task CUE policy, exploration, albums, artists, text normalization, edition precedence, and cache administration |
 | Plugin | [api/plugin.md](api/plugin.md) | `plugin.*` | plugin market, install/runtime, configuration, source, folders, ratings, releases, and statistics |
 | Recommendation | [api/recommendation.md](api/recommendation.md) | `recommendation.*` | recommendation listings |
 | Scheduler | [api/scheduler.md](api/scheduler.md) | `scheduler.*` | scheduler listing, progress, and execution |
@@ -268,6 +274,8 @@ The `download.add` body must contain `torrent_in` (at least `title` and `enclosu
 
 ## Collection Counts And Pagination
 
+- Search SSE `manual_paging=true` is a Web-only page-by-page mode and adds no Agent
+  operations; keep using the documented `search.*` operations.
 - For list inspection, explicitly send the operation's documented pagination
   fields instead of requesting an unbounded legacy result. For optional legacy
   pagination, start with `query={"page":1,"count":20}`.

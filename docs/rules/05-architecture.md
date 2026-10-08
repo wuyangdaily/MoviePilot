@@ -66,7 +66,7 @@ to make the directory tree look symmetrical.
 | `app/application/download/` | Download task querying/control and selection use cases; `failures.py` owns the frozen failure-cooldown write/query DTOs and persistence Port |
 | `app/application/history/` | History use cases and persistence contracts; DownloadHistory and TransferHistory own deeply frozen DTOs plus typed query/write/staging ports |
 | `app/application/music/` | 多来源音乐目录编排；`observation.py` 沿用站点搜索的调用观察模式，隔离一次音乐识别的结果、候选摘要与请求/等待预算，不持有来源客户端、不改变旧模块返回合同；`recognition.py` 通过注入来源回调串行回退、汇总诊断，并按领域候选计划有界补充真实Artist身份别名，子来源共享祖先预算，`catalog.py` 声明目录查询所需的最小来源 Port |
-| `app/application/audio.py` | 本地音频标签与 CUE 证据读取；通过 `runtime.settings` 读取 `MUSIC_CUE_ENABLE`，保持宿主启动前的独立读取能力。Chain 专辑缓存通过配置快照隔离 CUE 模式；Domain CUE 解析器保持无配置依赖 |
+| `app/application/audio.py` | 本地音频标签与 CUE 证据读取；`use_music_cue` 在当前上下文绑定本次整理策略，`music_cue_enabled` 未绑定时通过 `runtime.settings` 读取 `MUSIC_CUE_ENABLE`，保持启动前独立读取能力。手动入口隔离策略，准入 options 保存有效值，执行入口恢复冻结策略，Chain 专辑缓存按同一有效值隔离；Domain CUE 解析器保持无配置依赖 |
 | `app/application/messaging/message.py` | 模板上下文按既有来源优先级选定音乐字段后，使用配置快照和 `app.foundation.text.convert` 应用简体开关；不调用识别 Chain、不改写标签或来源缓存，也不替换录音所属发行和多艺人署名 |
 | `app/application/chain/` | Injectable Chain runtime capabilities: `context.py` owns the typed runtime and persistence dependency aggregate, and `events.py` owns durable event write contracts plus replayable payload conversion |
 | `app/application/agent.py` | Agent orchestration facade and typed `AgentDataContext`; startup injects one explicit data context into the manager, memory, tool and scheduler owners without a process-wide persistence locator |
@@ -802,6 +802,13 @@ consumes the registered runtime and must not recreate provider discovery or lega
 runtime fallbacks; management tests pass the facade directly to avoid a
 `provider_manage -> helper -> gateway -> provider_manage` call loop.
 
+`LLMHelper.get_llm()` 返回的 OpenAI/DeepSeek 模型独占其 `http_client` 和
+`http_async_client`；使用者通过 `LLMHelper.close_llm()` 在原事件循环释放连接。
+同步客户端关闭复用 `ThreadHelper.submit()` 的宿主线程池，不在事件循环阻塞等待。
+模型测试与标题生成在请求的 `finally` 中关闭；Agent 缓存图持有执行、摘要和子代理
+模型，图复核中丢弃的临时模型立即关闭，旧图则等待子代理与后台复盘退出后释放。
+关闭失败时 Agent 保留模型 owner 并重试，不遍历或关闭供应商 SDK 内部的共享客户端。
+
 `app.agent` and `app.agent.llm` package roots contain no implementation,
 dynamic forwarding or host export list. Canonical callers import the owning
 module directly, such as `app.agent.orchestrator`, `app.agent.llm.helper`,
@@ -1263,3 +1270,13 @@ modules only through `run_module` dispatch), and downloader SDK
 *Last Updated: 2026-08-29*
 
 分类词表由 `app/domain/classification/vocabulary.py` 拥有，供 `facts.py`、`fields.py` 和旧配置迁移复用；只含离线词表及纯选项投影，不读取运行时配置、数据库或具体来源模块。
+
+### 逐页搜索检查点
+
+- `domain/search.py`：纯收集规则（缺集关闭、站点已收录边界、页面连续性）。
+- `application/search/session.py`：检查点 Port 与不含凭据的候选快照。
+- `db/oper/searchsession.py` / `db/adapters/searchsession.py`：检查点读写与短 UoW；创建、保存、删除都在写入语句内校验队列任务租约和版本。`db/oper/subscriptionsearch.py` 在任务进入终态的同一事务中删除检查点。
+- `chain/search/scan.py`：`SearchSources` 提供来源与单页请求，自动订阅的 `SearchScan` 与手动分页 `chain/search/manual.py` 共用；手动分页不写数据库，页摘要走 Runtime 缓存门面。
+- 恢复候选的下载凭据经 `run_module("restore_search_torrent")` 由 Indexer 重建，Chain 不直接导入 Indexer 或数据库；该方法是宿主内部契约，不对插件公开。
+
+业务规则见 `docs/smart-search.md`。
