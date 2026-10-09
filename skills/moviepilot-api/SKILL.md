@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 46
+version: 47
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -228,6 +228,11 @@ Agent operation. It clears corrupt task state while retaining the history record
 
 ## Calling Contract
 
+Setting a subscription to state `S` stops queued and running automatic searches at safe
+boundaries, including new-subscription and site-retry tasks. An explicit subscription search
+can still search and download once while paused; cancel its execution batch to stop that run.
+Pausing or cancelling does not remove tasks already submitted to the downloader.
+
 Call the gateway with this shape:
 
 ```json
@@ -275,7 +280,9 @@ The `download.add` body must contain `torrent_in` (at least `title` and `enclosu
 ## Collection Counts And Pagination
 
 - Search SSE `manual_paging=true` is a Web-only page-by-page mode and adds no Agent
-  operations; keep using the documented `search.*` operations.
+  operations; keep using the documented `search.*` operations. Web streams search
+  sites concurrently and emit `append` previews before the final filtered page;
+  only the completed result carries source state for advancing page numbers.
 - For list inspection, explicitly send the operation's documented pagination
   fields instead of requesting an unbounded legacy result. For optional legacy
   pagination, start with `query={"page":1,"count":20}`.

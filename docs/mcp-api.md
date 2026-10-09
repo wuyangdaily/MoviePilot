@@ -719,6 +719,8 @@ AMLL 使用无需鉴权的原生搜索与获取接口，先尝试 ISRC，再核�
 
 插件可通过 `get_module()` 注册 `music_lyrics_candidates(music)`，负责匹配并下载歌词内容，返回 `list[MusicLyrics]` 参与宿主择优；`MetaMusic`、`MusicInfo` 和 `MusicLyrics` 均可从 `app.sdk.media` 导入。该接口不需要注册 HTTP 路由，歌词文件仍由刮削链统一写入。完整契约和示例见[歌词插件开发说明](https://github.com/jxxghp/MoviePilot-Plugins/blob/main/docs/faq/21-register-lyrics-provider.md)。
 
+`MUSIC_LYRICS_TO_SIMPLIFIED` 默认关闭，独立于音乐元数据转简体设置。开启后，统一写入流程将本地或远端 `.lrc` / `.txt` 的正文转换为简体，保留时间轴、LRC 标签、候选对象和来源 Lyricsfile；AMLL TTML 派生的 LRC 同样适用。已有歌词继续遵循质量升级和覆盖策略，需转换时选择“总是刮削”重新刮削。
+
 音乐订阅可使用 `audio_quality=hires|lossless|lossy`（支持正则组合）、`audio_format`、`min_bitrate`、`min_bit_depth`、`min_sample_rate` 过滤资源。`best_version=1` 开启音质洗版，系统按格式、无损属性、位深、采样率和码率换算 0-100 优先级，只下载高于 `current_priority` 的候选；DSD 或 24-bit/192 kHz 无损资源达到终态 100。内置规则 `HIRES`、`LOSSLESS`、`FLAC`、`ALAC`、`APE`、`WAV`、`DSD`、`MP3`、`AAC`、`OPUS`、`BITRATE320`、`BITRATE256`、`BITRATE192` 可用于自定义过滤规则组。
 
 #### 下载
@@ -801,6 +803,8 @@ TMDB 缓存查询响应的 `data` 包含 `count`、`recognized`、`unrecognized`
 | `subscription.execution.cancel` | PUT | `/api/v1/subscribe/execution/batches/{batch_id}/cancel` | 在下载副作用边界前请求取消一个批次 |
 
 取消是幂等的状态请求，不会撤销已经提交到下载器的任务；批次详情中的状态和任务结果才是最终事实。
+将订阅状态设为 `S` 会阻止已入队的新订阅、定时及站点恢复自动搜索，并在自动下载提交前生效。
+手动或指定订阅补搜仍可对暂停订阅执行一次，需要停止该补搜时使用批次取消接口。
 
 ### 跨来源订阅回显
 
@@ -1174,4 +1178,4 @@ description、aliases、instructions，或通过 `append_instructions` 追加规
 
 ## Web 手动分页
 
-`/api/v1/search/title/stream` 与 `/api/v1/search/media/{media_id}/stream` 新增可选参数 `manual_paging`、`page`、`source`。`manual_paging=true` 时每个来源只返回指定的一页，`replace`/`done` 事件附带各来源的 `source`、`site_name`、`page`、`can_continue`、`error`。不传该参数时行为不变，Agent `search.*` operation 不受影响。完整规则及订阅补全搜索策略 `SubscribeSearchStrategy` 见 [订阅补全搜索与手动分页](smart-search.md)。
+`/api/v1/search/title/stream` 与 `/api/v1/search/media/{media_id}/stream` 新增可选参数 `manual_paging`、`page`、`source`。`manual_paging=true` 时每个来源只返回指定的一页，不同站点按既有并发数请求，并在来源完成后发送 `append` 预览；最终统一过滤后的 `replace`/`done` 事件附带各来源的 `source`、`site_name`、`page`、`can_continue`、`error`，预览不推进页号。不传该参数时行为不变，Agent `search.*` operation 不受影响。完整规则及订阅补全搜索策略 `SubscribeSearchStrategy` 见 [订阅补全搜索与手动分页](smart-search.md)。
