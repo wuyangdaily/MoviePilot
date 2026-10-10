@@ -7,8 +7,6 @@ from app.chain.download import DownloadChain
 from app.chain.media import MediaChain
 from app.domain.context import Context as DownloadContext
 from app.domain.context import MediaInfo as DownloadMediaInfo
-from app.domain.context import MusicInfo as DownloadMusicInfo
-from app.domain.context import TorrentInfo as DownloadTorrentInfo
 from app.domain.meta.metabase import MetaBase
 from app.domain.meta.metamusic import MetaMusic
 from app.domain.metainfo import MetaInfo
@@ -17,7 +15,7 @@ from app.runtime.stop import runtime_stop_state
 from app.schemas.context import Context as WorkflowTorrentContext
 from app.schemas.types import MediaType
 from app.schemas.workflow import ActionContext, ActionParams, DownloadTask
-from app.workflow.actions import BaseAction
+from app.workflow.actions import BaseAction, domain_media_info_from_dict, domain_torrent_info_from_dict
 
 
 class AddDownloadParams(ActionParams):
@@ -132,27 +130,24 @@ class AddDownloadAction(BaseAction):
         return context
 
     @staticmethod
-    def _to_domain_context(context: WorkflowTorrentContext) -> DownloadContext:
-        """把工作流传输模型转换为下载链使用的领域上下文和媒体类型。"""
+    def _to_domain_context(context: WorkflowTorrentContext | DownloadContext) -> DownloadContext:
+        """复用 RSS 的领域上下文，或把工作流传输模型还原为下载链领域对象。"""
         if context.media_info is None or context.torrent_info is None:
             raise ValueError("工作流下载上下文缺少媒体或种子信息")
+
+        if isinstance(context, DownloadContext):
+            return context
 
         context_data: dict[str, Any] = context.model_dump()
         media_data = context_data.get("media_info")
         if not isinstance(media_data, dict):
             raise ValueError("工作流下载上下文缺少有效媒体信息")
-        domain_media_info: DownloadMediaInfo | DownloadMusicInfo
-        if media_data.get("type") == MediaType.MUSIC.value:
-            domain_media_info = DownloadMusicInfo.from_dict(media_data)
-        else:
-            domain_media_info = DownloadMediaInfo()
-            domain_media_info.from_dict(media_data)
+        domain_media_info = domain_media_info_from_dict(media_data)
 
         torrent_data = context_data.get("torrent_info")
         if not isinstance(torrent_data, dict):
             raise ValueError("工作流下载上下文缺少有效种子信息")
-        domain_torrent_info = DownloadTorrentInfo()
-        domain_torrent_info.from_dict(torrent_data)
+        domain_torrent_info = domain_torrent_info_from_dict(torrent_data)
 
         domain_meta_info: MetaBase | None = None
         meta_data = context_data.get("meta_info")
