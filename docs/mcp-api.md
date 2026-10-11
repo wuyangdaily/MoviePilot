@@ -53,6 +53,8 @@ MCP 当前不会主动发送工具列表变更通知（`listChanged=false`）。
 
 `execute_code` 仅在已绑定宿主会话的管理员 Agent 中提供，不发布到外部 HTTP/MCP 工具目录。内部只读 RPC 仍经过同一个 API/Skill/身份边界，默认直接执行，不要求用户逐次确认；外部客户端不能通过直接调用为自己创建 Python 会话身份。持久状态和回收语义见 [Python 只读工具编排](agent.md#python-只读工具编排)。
 
+Python 内核继承宿主部署环境（含数据库配置与连接凭据），移除宿主 `PYTHONPATH` 并固定 UTF-8 输出。配置在内核启动时读取；变更后使用 `reset=true` 重新加载，环境变量不会自动返回给模型。
+
 内置 Agent 通过渠道调用业务 API 时，QQ 的 `qq_userid` / `qq_openid`、飞书的
 `feishu_userid` / `feishu_openid` 都是候选绑定字段，任一字段与当前渠道标识一致即可
 解析到对应的启用用户，无需将两个字段填成相同值。同一标识命中多个启用用户时拒绝归属；
@@ -731,6 +733,11 @@ AMLL 使用无需鉴权的原生搜索与获取接口，先尝试 ISRC，再核�
 音乐订阅可使用 `audio_quality=hires|lossless|lossy`（支持正则组合）、`audio_format`、`min_bitrate`、`min_bit_depth`、`min_sample_rate` 过滤资源。`best_version=1` 开启音质洗版，系统按格式、无损属性、位深、采样率和码率换算 0-100 优先级，只下载高于 `current_priority` 的候选；DSD 或 24-bit/192 kHz 无损资源达到终态 100。内置规则 `HIRES`、`LOSSLESS`、`FLAC`、`ALAC`、`APE`、`WAV`、`DSD`、`MP3`、`AAC`、`OPUS`、`BITRATE320`、`BITRATE256`、`BITRATE192` 可用于自定义过滤规则组。
 
 #### 下载
+
+提交种子时应保留搜索结果的站点 ID、下载地址及其他资源字段。普通 HTTP(S) 种子下载省略或传空
+`site_cookie` 时，后端优先按 `site` 查询配置；未提供 `site` 时，仅使用与下载地址同来源的唯一站点配置。
+下载地址与配置站点的协议、主机和端口必须一致，才补齐 Cookie 及缺失的 `site_ua`；显式凭据和代理选择保持原样。
+未匹配配置、配置有歧义或站点没有 Cookie 时沿用原有下载行为。磁力链和两段式换票下载保持原有凭据规则。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
