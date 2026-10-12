@@ -182,14 +182,20 @@ def _verify_log_resource_superuser(
     return token_payload
 
 
-async def _build_log_zip_response(name: str, runtime: HostRuntime) -> StreamingResponse:
+async def _build_log_zip_response(
+    name: str,
+    runtime: HostRuntime,
+    allow_empty: bool = False,
+) -> StreamingResponse:
     """读取受限日志条目并生成兼容 ZIP 响应。"""
     try:
         entries = await runtime.system.collect_logs(name)
     except LogNotFoundError as error:
-        raise HTTPException(status_code=404, detail="Not Found") from error
+        if not allow_empty:
+            raise HTTPException(status_code=404, detail="Not Found") from error
+        entries = [LogFileData(name="README.txt", content="暂无执行日志，下一次搜索或 RSS 匹配后开始记录。".encode("utf-8"))]
     zip_data, zip_stem = await anyio.to_thread.run_sync(_build_log_zip_data, name, entries)
-    headers = {"Content-Disposition": f'attachment; filename="{zip_stem}.zip"'}
+    headers = {"Content-Disposition": f'attachment; filename="{zip_stem}.zip"', "Cache-Control": "no-store"}
     return StreamingResponse(
         iter([zip_data]),
         media_type="application/zip",
@@ -197,11 +203,14 @@ async def _build_log_zip_response(name: str, runtime: HostRuntime) -> StreamingR
     )
 
 
-def _build_log_zip_data(name: str, entries: list[LogFileData]) -> tuple[bytes, str]:
+def _build_log_zip_data(
+    name: str,
+    entries: list[LogFileData],
+) -> tuple[bytes, str]:
     """只负责把应用服务提供的日志内容编码为 ZIP framing。"""
     zip_buffer = io.BytesIO()
     filename_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-    safe_name = (name or "logs").strip().lower() or "logs"
+    safe_name = (name or "logs").strip().lower().replace("/", "-") or "logs"
     zip_stem = f"{safe_name}-logs-{filename_time}"
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
         for entry in entries:

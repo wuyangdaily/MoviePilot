@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 50
+version: 53
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -209,6 +209,10 @@ frontmatter allowlist, and the matching gateway contract together.
 
 ## API Surface Scope
 
+Operations declare an identity scope: `public` reads external public metadata without requiring a channel account binding; `bound_user` uses the active MoviePilot user bound to the stable channel sender ID (Web uses its authenticated user ID); `admin` requires administrator authority. Read-only does not mean public. Channel nicknames never establish identity. Personal records and subscription writes retain their existing ownership and permission checks.
+
+When identity resolution fails, relay the gateway's actual remediation message and sender ID. Channel users bind their own MoviePilot account via avatar > Personal Information > Account Binding, fill the named channel field, and save. Do not invent a Settings > Users binding page, substitute nicknames/group/bot IDs, diagnose an ambiguous binding failure as a network issue, or ask Web users to bind a notification channel. Public operations do not require binding.
+
 This Skill is the complete callable MoviePilot business API surface for the
 Agent. Every operation in `allowed-api-operations` has one exact parameter
 contract in a category file and one matching MCP `tools/list` branch. There is
@@ -264,6 +268,14 @@ Select the operation for the task first, then send only fields declared by that 
 | `subscription.list` | none | optional `page`, `count` |
 | `download.tasks.active` | none | optional `page`, `count`, `name` |
 | `site.list` | none | optional `page`, `count`, `name`, `status=all\|active\|inactive` |
+
+Subscription execution logs are browser resource endpoints:
+`GET /api/v1/subscribe/{subscription_id}/logs` (SSE, or text with `length=-1`)
+and `/logs/download` (ZIP). They require the existing resource Cookie and enforce
+subscription ownership; they are not JSON gateway or MCP tools. Do not pass a
+logfile path or try to call them through `call_api`. Read subscription status
+through the supported subscription operations; completion of a search task does
+not prove completion of the subscription.
 
 The `download.add` body must contain `torrent_in` (at least `title` and `enclosure`) plus sibling `media_source` and `media_id`; do not put a magnet URI in `url`, or move media identity and filters into `query`. When a write returns `unknown`, never retry it; verify the actual state with a supported read operation first.
 
