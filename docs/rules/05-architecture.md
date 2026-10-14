@@ -73,7 +73,7 @@ to make the directory tree look symmetrical.
 | `app/application/invocation.py` | Frozen Agent write-call identity, claim and receipt contracts; the injected repository provides atomic claim, fenced settlement and unresolved-state reads, while `db/adapters/invocation.py` owns short transactions and cold-start recovery is invoked by startup |
 | `app/application/network.py` | System network-test target catalog, immutable public/private projections, URL and redirect admission, response validation and the injected transport Port; startup owns concrete HTTP Adapter assembly |
 | `app/application/outbox.py` | Durable intent, transaction-only stager, short-transaction dispatch store, claim fencing and structured post-commit result contracts |
-| `app/application/transfer/` | Durable transfer use cases: `workflow.py` owns queue service orchestration; `models.py` owns admission/planning/task contracts; `jobs.py` owns in-process task views; `notifications.py` owns failure aggregation; `projection.py` owns domain projections; `execution.py` owns stable operation identity, step/checkpoint state, retry/manual-review commands and terminal-settlement DTOs; `recovery.py` owns failed/corrupt task cleanup and history detachment through the execution repository; `history.py` projects history write fields and file fingerprints; `feedback.py` owns failure stages, notification snapshots and message text, while Chain owns notification delivery and cleanup side effects |
+| `app/application/transfer/` | Durable transfer use cases: `workflow.py` owns queue service orchestration; `models.py` owns admission/planning/task contracts; `jobs.py` owns in-process task views; `notifications.py` owns success/failure notification snapshots, batch waiting and quiet-window aggregation; `projection.py` owns domain projections; `execution.py` owns stable operation identity, step/checkpoint state, retry/manual-review commands and terminal-settlement DTOs; `recovery.py` owns failed/corrupt task cleanup and history detachment through the execution repository; `history.py` projects history write fields and file fingerprints; `feedback.py` owns failure stages, notification snapshots and message text, while Chain owns notification delivery and cleanup side effects |
 | `app/chain/transfer/music.py` | 音乐整理的纯标签准入、目录共识、发行分组与曲目上下文编排；`filter.py` 保留通用文件筛选和既有 mixin 调用契约。可信标签在本地完成分类与命名，分类的外部事实补充可由本次用例明确禁用，仍遵守用户策略与人工覆盖 |
 | `app/application/plugin/` | Plugin market catalog, installation command, installed-plugin identity contract and startup migration, runtime port, folder operations and dynamic-route use cases; filenames remain single words (`catalog.py`, `identity.py`, `migration.py`, `install.py`, `runtime.py`, `folders.py`, `routes.py`) |
 | `app/application/server/` | MoviePilot Server reporting and sharing use cases; local data readers and transport callbacks are injected by startup |
@@ -646,12 +646,19 @@ Shared subscription metadata and media-key construction belongs to
 `app.application.subscription.contract`; `app.chain.subscribe` is a same-named package
 whose root exposes only the stable `SubscribeChain`. `facade.py` owns the class
 identity and event entry wrappers; `create.py`, `search.py`, `match.py`, `refresh.py`,
-`completion.py`, `reconcile.py` and `notify.py` are the single owners of their
+`completion.py`, `music.py`, `reconcile.py` and `notify.py` are the single owners of their
 respective workflows, while `query.py`, `interaction.py`, `identity.py` and `policy.py`
 own the remaining focused capabilities. Startup imports the subscription share Port
 directly from `notify.py`; canonical callers import identity projection directly from
 `identity.py`. The retired `app/chain/subscribe.py` monolith must not return, package
 owners must not be re-exported, and `_music` must not import its concrete chain owner.
+`music.py` 通过已注入的下载/整理历史 Port 关联成功入库文件，只读取本地音频标签和
+有效 CUE，按真实发行身份分组对账；发行身份与逐盘完整覆盖的纯规则归 `domain/music.py`。
+它通过既有订阅 mutation 写入事实和总曲目数，不新增数据库字段，也不从文件数量猜测完成。
+下载提交 owner 则按种子实际 hash、全部音频成功整理记录及仍存在的本地目标阻止音乐订阅重复提交；人工下载
+和未完整整理的任务保留原行为。新增 owner 使冷导入宿主模块数各增加 1：
+`app.startup.lifecycle` 586 → 587、`app.factory` 599 → 600、`app.main` 601 → 602；
+原有耗时预算、采样和生命周期约束保持不变。
 `app.chain.search.execution` reads the Application-owned `SubscriptionSiteBudget`
 contract to apply subscription-only keyword scheduling and IMDb query deduplication;
 the site budget and provider retain request admission, per-site intervals and cooldown
