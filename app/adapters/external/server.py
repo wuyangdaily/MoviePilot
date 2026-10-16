@@ -2,7 +2,7 @@ import asyncio
 import json
 import platform
 from collections.abc import Coroutine
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, ParamSpec, Tuple, Union, cast
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 from app.adapters.network.http import AsyncRequestUtils, RequestUtils
@@ -26,6 +26,33 @@ from app.schemas.types import (
 )
 
 # 中心服务适配器只通过 runtime 读取端口消费组合根的最新配置。
+
+
+_LookupParams = ParamSpec("_LookupParams")
+
+
+def _cached_server_lookup(
+    maxsize: int,
+) -> Callable[
+    [Callable[_LookupParams, Awaitable[Dict[str, Any]]]],
+    Callable[_LookupParams, Awaitable[Dict[str, Any]]],
+]:
+    """为中心服务开关与权限查询提供保留签名的短时进程内缓存。
+
+    成功结果缓存 60 秒，使服务端开关与名单变更在一分钟内生效；不可达或非 200 得到的
+    空结果只缓存 15 秒，故障恢复后尽快重新判定。结果随本实例身份变化，不共享到 Redis。
+    """
+
+    def decorator(
+        function: Callable[_LookupParams, Awaitable[Dict[str, Any]]],
+    ) -> Callable[_LookupParams, Awaitable[Dict[str, Any]]]:
+        """包装单个查询函数，缓存层本身未标注类型，这里显式恢复原签名。"""
+        return cast(
+            Callable[_LookupParams, Awaitable[Dict[str, Any]]],
+            cached(maxsize=maxsize, ttl=60, empty_ttl=15, local_only=True)(function),
+        )
+
+    return decorator
 
 
 _server_report_service: Any = None
@@ -77,6 +104,7 @@ class MoviePilotServerHelper:
     _WORKFLOW_FORK_PATH = "/workflow/fork"
     _RECOGNIZE_SHARE_PATH = "/recognize/share"
     _USER_PERMISSIONS_PATH = "/user/permissions"
+    _USER_FEATURES_PATH = "/user/features"
     _LOCAL_REPO_PREFIX = "local://"
     _user_uid: Optional[str] = None
     _github_user: Optional[str] = None
@@ -230,6 +258,32 @@ class MoviePilotServerHelper:
         )
 
     @classmethod
+    async def async_user_features(cls) -> Any:
+        """
+        异步查询服务端对所有实例相同的全局功能开关。
+        """
+        return await cls._async_get(
+            cls._server_url(cls._USER_FEATURES_PATH),
+            include_user_uid=False,
+            timeout=5,
+        )
+
+    @classmethod
+    @_cached_server_lookup(maxsize=1)
+    async def async_get_features(cls) -> Dict[str, Any]:
+        """
+        获取服务端全局功能开关（如 ``community_medals``），失败时返回空对象。
+
+        结果与实例身份无关，用单一键缓存：成功 60 秒，使开关变更在一分钟内生效；服务端
+        不可达或非 200 得到的空结果只缓存 15 秒。仅缓存于进程内存。
+        """
+        try:
+            return cls._handle_mapping_response(await cls.async_user_features())
+        except Exception as err:
+            logger.debug(f"获取服务端全局功能开关失败：{str(err)}")
+        return {}
+
+    @classmethod
     def get_user_permissions(cls) -> Dict[str, Any]:
         """
         获取当前用户在服务端配置中的权限。
@@ -246,11 +300,25 @@ class MoviePilotServerHelper:
     @classmethod
     async def async_get_user_permissions(cls) -> Dict[str, Any]:
         """
-        异步获取当前用户在服务端配置中的权限。
+        异步获取当前用户在服务端配置中的权限；未登录 GitHub 时不发请求并返回空权限。
         """
         github_user = await cls.async_get_github_user()
         if not github_user:
             return {}
+        return await cls._async_fetch_user_permissions(github_user)
+
+    @classmethod
+    @_cached_server_lookup(maxsize=4)
+    async def _async_fetch_user_permissions(cls, github_user: str) -> Dict[str, Any]:
+        """
+        按 GitHub 用户名查询并短时缓存服务端权限。
+
+        前端每次加载会同时请求 ``/system/global/user`` 与 ``/github/community``，两者都依赖
+        此结果（共享管理权限与社区勋章预览），短时缓存避免每次页面加载向服务端重复往返。
+        缓存键为用户名，换账号后不沿用旧结论。成功结果缓存 60 秒，使服务端开关与管理员名单变更在一分钟内生效；服务端
+        不可达或非 200 得到的空权限只缓存 15 秒，故障恢复后尽快重新判定。仅缓存于进程内存，
+        权限随本实例 GitHub 身份变化，不共享到 Redis。
+        """
         try:
             return cls._handle_mapping_response(
                 await cls.async_user_permissions(github_user)

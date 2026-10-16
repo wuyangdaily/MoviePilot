@@ -30,6 +30,10 @@ MCP 使用系统配置中的 `API_TOKEN` 作为认证密钥，文档中的 API K
 域名不自动扩展授权；必要时加入 `SECURITY_IMAGE_DOMAINS`。
 域名放行后仍执行 DNS/私网校验，
 Fake-IP 等非公网解析地址需要通过 `IMAGE_PROXY_ALLOWED_PRIVATE_RANGES` 明确允许。
+图片请求关闭底层自动重定向，最多跟随 5 次跳转，每次在请求前重新检查目标。
+公网 CDN 跳转可正常跟随；私网网段例外仅对配置中的域名生效，媒体服务器信任仅对精确主机生效，
+原图片的签名不能授权另一个私网目标。同源跳转按标准域、路径、Secure 和删除规则接收响应 Cookie；
+跨来源跳转清除 Cookie 和 Referer，后续返回原来源也不恢复此前凭据。
 
 ### 单订阅执行日志（浏览器资源接口）
 
@@ -358,6 +362,64 @@ MoviePilot 的内置 Agent 也可以作为 MCP Client 连接外部 MCP 服务器
 | -32603 | Internal error | 服务器内部错误 |
 
 ## 6. RESTful API
+
+### 社区勋章（前端专用）
+
+`GET /api/v1/github/community?refresh=false` 仅接受超级管理员登录态，沿用实例 GitHub
+Token 的权限边界；普通用户不能继承该账号的勋章。此接口不加入 Agent/MCP 工具，Token
+原文不进入响应。
+
+勋章的计算与人工颁发都在 MoviePilot-Wiki 完成，定时任务发布公开名单
+`https://raw.githubusercontent.com/jxxghp/MoviePilot-Wiki/main/community/medals.json`。
+实例不再逐仓调用 GitHub 统计接口，只用 Token 调 `GET /user` 取得 GitHub 数字 ID 并查表；
+身份不接受前端或参数声明的用户名。名单请求不携带 Token；配置 `GITHUB_PROXY` 时先经
+镜像站读取，失败再经 `PROXY`（未配置时直连）访问原地址。
+
+社区勋章的有效开关为：本机设置开启，且服务端全局开关开启或当前 GitHub 用户在服务端预览名单中。
+
+- 本机设置 `COMMUNITY_MEDALS_ENABLE`（默认 `true`）与其他系统设置一样经
+  `GET/POST /api/v1/system/env` 读写。关闭后实例不做任何勋章相关请求，既不查询服务端开关，
+  也不拉取名单。
+- 全局开关来自服务端 `GET /user/features` 的 `community_medals`，该接口不带任何身份参数，
+  对所有实例返回相同结果。
+- 预览来自服务端 `GET /user/permissions?github_user=<登录名>` 的 `community_medals_preview`，
+  只在实例已登录 GitHub 时查询；服务端预览名单为空时无人可预览。未登录 GitHub 时只看全局开关。
+- 字段缺失、非 200 或服务端不可达都视为关闭。
+
+`GET /api/v1/system/global/user` 以 `COMMUNITY_MEDALS_ENABLED` 布尔值返回有效开关。开关
+关闭时本接口照常成功返回，`state` 为 `disabled`、`medals` 为 `[]`，不核验身份也不拉取
+Wiki 名单；开关开启但未配置 Token 时为 `unconfigured`，同样不拉取名单，前端可提示配置
+GitHub Token。全局开关与按用户名区分的权限结果各自在进程内缓存 60 秒，失败或空结果缓存
+15 秒。
+
+`data` 包含以下字段。
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `state` | `disabled` 本机关闭或服务端未开放社区勋章；`unconfigured` 功能已开放但未配置 Token；`ready` 已核对名单；`unavailable` Token 失效或名单从未取得 |
+| `login` / `user_id` | Token 对应的 GitHub 登录名与数字 ID，勋章只按数字 ID 查表 |
+| `medals` | 名单 `holders[<user_id>].medals` 的记录，名单中没有该 ID 时为 `[]` |
+| `generated_at` | 名单生成时间（ISO 8601 UTC） |
+| `checked_at` | 实例最近一次成功核对名单的 Unix 时间戳 |
+| `stale` | 最近一次刷新失败，当前为同一 Token 的上次结果 |
+
+`medals` 每条记录与名单一致，名单中省略的字段在响应中同样省略。阶梯勋章键为 `code`
+（编剧）与 `plugin`（布景），人工勋章键为 `maintainer`（主创）、`helper`（掌灯）、`security`（守夜）、
+`tester`（试映）、`pioneer`（启幕）；勋章键以名单为准，
+实例不维护键清单。已知字段为 `key`、`tier`（1–4）、`specialty`（编剧领域称号）、`at`
+（`YYYY-MM-DD` 或 `YYYY`，人工勋章只用单个 `at`）、`basis`、`years`（保留的整数年份列表，
+仍按类型校验）、`note`、`serial`、`facts`。名单协议的边界处理如下。
+
+- 顶层 `schema` 必须为整数 1，且 `generated_at` 为非空字符串、`holders` 为对象，否则按拉取失败处理。
+- `holders` 以 GitHub 数字 ID 字符串为键，值为 `{"login": ..., "medals": [...]}`；目标 ID 的值不是对象或 `medals` 不是数组时按拉取失败处理。持有人对象的其他字段与顶层 `unlinked` 不参与查表。
+- 单条记录须为带非空字符串 `key` 的对象；已知字段类型不符（如 `tier` 超出 1–4、`at` 不是日期或年份）时只丢弃该条。
+- 未认识的勋章键与字段原样透传，消费方应忽略不认识的内容。
+
+服务端合并并发查询、缓存六小时，`refresh=true` 仍受一分钟冷却保护。名单拉取失败时保留
+同一 Token 上次结果并标记 `stale`，没有旧结果为 `unavailable`。换 Token、删除 Token、
+Token 明确失效或查询期间切换账号都不能发布旧身份的勋章。前端在 `ready` 且 `medals`
+非空时显示头像菜单入口，`disabled` 时隐藏全部勋章入口。
+
 HTTP 工具管理端点统一位于 `/api/v1/mcp`，并与标准 MCP JSON-RPC 端点共享同一最终工具目录。
 
 ### 相关 REST 端点
@@ -443,7 +505,7 @@ FastAPI 的 HTTP 异常和参数校验异常统一使用 `message`，不再返�
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/media/search` | 按标题搜索媒体、合集、影视人物或音乐；人物结果可同时包含 MusicBrainz 艺术家，参数：`title`、`type`、`page`、`count`，可重复传入可选 `media_source`；未指定 `music_type` 时音乐搜索只返回单曲和专辑，显式 `music_type` 仍可用于专用实体选择；内置模块只处理自身支持的来源，插件模块可以处理其注册的扩展来源，旧客户端的逗号格式仅在输入边界兼容 |
-| GET | `/api/v1/media/recognize` | 识别标题，参数：`title`、`subtitle`、`custom_words`，可选 `media_source`；当 `title` 为含目录的媒体文件路径时，会合并父目录中的名称、年份等信息 |
+| GET | `/api/v1/media/recognize` | 识别标题，参数：`title`、`subtitle`、`custom_words`，可选 `media_source`；当 `title` 为含目录的媒体文件路径时，会合并父目录中的名称、年份等信息；未匹配到媒体时仍返回解析元数据 `meta_info`（含实际应用的识别词 `apply_words`），`media_info` 为空 |
 | GET | `/api/v1/media/recognize_file` | 识别文件路径，参数：`path`，可选 `media_source` |
 | GET | `/api/v1/media/{media_id}` | 按原生 ID 查询影视或音乐详情；必填参数：`media_source`、`type_name`，其中 `media_source` 与路径中的 `media_id` 组成统一媒体身份，`type_name` 支持电影、电视剧和音乐 |
 | POST | `/api/v1/media/scrape/{storage}` | 刮削媒体元数据；请求体为 `FileItem`，可选查询参数 `media_source`、`media_id`、`type_name`（电影/电视剧/音乐）和 TMDB `episode_group`。剧集组用于指定电视剧的季集顺序；音乐会按策略处理音频标签、封面和歌词。会覆盖目标位置已有的图片、NFO 和音频标签，与文件管理、手动整理一样需要管理权限 |
@@ -781,6 +843,9 @@ AMLL 使用无需鉴权的原生搜索与获取接口，先尝试 ISRC，再核�
 | GET | `/api/v1/download/clients` | 查询可用下载器 |
 | GET | `/api/v1/download/paths` | 查询可用于下载接口 `save_path` 参数的下载路径，返回项的非空 `name` 也可直接作为 `save_path` 提交 |
 | DELETE | `/api/v1/download/{hashString}` | 删除下载任务，参数：`name` |
+
+查询全局下载任务、启停、更新和删除均要求 `manage` 管理权限或超级管理员身份；
+删除任务会同时删除下载器中的源文件。无管理权限的普通登录用户调用这些接口返回 403。
 
 资源目录重新分类只接受仍存在于下载器且具有可恢复媒体类型的下载历史任务；识别模式可复用历史中的媒体来源和同来源媒体 ID，也可在请求中指定来源、媒体 ID 或当前策略中已启用且媒体类型匹配的 `media_category`。
 目标路径必须落在已配置的资源根目录内，并且目录需开启“资源目录按类别分类”或绑定固定分类。

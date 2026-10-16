@@ -46,6 +46,51 @@ class GithubUser:
     """GitHub 当前用户的最小身份摘要。"""
 
     login: str
+    user_id: int = 0
+
+
+# Wiki 名单的协议版本；结构不兼容时由名单方提升版本，旧实例按拉取失败处理而不是误读字段。
+COMMUNITY_MEDAL_SCHEMA = 1
+
+
+@dataclass(frozen=True, slots=True)
+class GithubMedalSnapshot:
+    """Wiki 勋章名单中某个 GitHub 数字 ID 的记录与名单生成时间。
+
+    ``medals`` 保留名单原始记录（已在协议边界校验），未认识的勋章键与字段原样透传，
+    名单中没有该 ID 时为空元组，表示已核对但暂无勋章。
+    """
+
+    generated_at: str
+    medals: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GithubCommunityProfile:
+    """社区勋章的脱敏快照；不可用与确证暂无勋章是不同状态。
+
+    state 取值：unconfigured、ready、unavailable，以及本机或服务端开关未生效时的 disabled。
+    """
+
+    state: str = "unconfigured"
+    login: str | None = None
+    user_id: int | None = None
+    medals: tuple[dict[str, Any], ...] = ()
+    generated_at: str | None = None
+    checked_at: int | None = None
+    stale: bool = False
+
+
+class GithubCommunityPort(Protocol):
+    """核验 GitHub 身份并读取 Wiki 社区勋章名单的外部端口。"""
+
+    async def get_user(self, access_token: str) -> GithubUser:
+        """使用 Token 校验身份，不接受前端声明的 GitHub 用户名。"""
+        ...
+
+    async def get_medal_snapshot(self, user_id: int) -> GithubMedalSnapshot:
+        """拉取公开勋章名单并取出指定数字 ID 的记录；名单不可用或格式不符时抛出传输错误。"""
+        ...
 
 
 class GithubAuthPort(Protocol):

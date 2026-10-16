@@ -32,13 +32,15 @@ from app.domain.meta.metamusic import MetaMusic
 from app.domain.music import (
     MusicDirectoryMatch,
     music_album_matches,
+    music_album_year_matches,
     music_artist_matches,
-    music_release_year_matches,
+    music_cover_priority,
     music_title_matches,
     music_track_title_is_weak,
     music_version_matches,
 )
 from app.runtime.log import logger
+from app.runtime.settings import get_runtime_setting
 from app.schemas.transfer import TransferInfo
 from app.schemas.types import (
     MUSIC_ENTITY_ALBUM,
@@ -156,6 +158,13 @@ class _MusicFileFilterBase(_TransferOwnerBase):
         path = str(fileitem.path or fileitem.name or "").casefold()
         return path.endswith((".lrc", ".txt", ".lyricsfile.yaml"))
 
+    @staticmethod
+    def _is_music_cover_file(fileitem: FileItem) -> bool:
+        """全局开关开启时接纳匹配的音乐封面，实际归属由音轨批次确认。"""
+        return get_runtime_setting("MUSIC_LOCAL_COVER_ENABLE") and fileitem.type == "file" and music_cover_priority(
+            str(fileitem.path or fileitem.name or ""), get_runtime_setting("MUSIC_COVER_FILE_PATTERNS")
+        ) is not None
+
     def _is_media_file(
             self,
             fileitem: FileItem,
@@ -235,7 +244,7 @@ class _MusicFileFilterBase(_TransferOwnerBase):
             and (weak_title or music_title_matches(info, file_meta.title))
             and (not file_meta.album or not info.album or music_album_matches(info, file_meta.album))
             and ((weak_title and not file_meta.version) or music_version_matches(info, file_meta))
-            and music_release_year_matches(info, file_meta)
+            and music_album_year_matches(info, file_meta)
         )
         if not evidence_matches:
             logger.warning(
@@ -367,6 +376,7 @@ class FileFilterMixin(_TransferOwnerBase):
     _is_music_lyrics_file = cast(
         Any, staticmethod(_MusicFileFilterBase._is_music_lyrics_file)
     )
+    _is_music_cover_file = cast(Any, staticmethod(_MusicFileFilterBase._is_music_cover_file))
     _is_media_file = cast(Any, _MusicFileFilterBase._is_media_file)
     _is_primary_media_file = cast(Any, _MusicFileFilterBase._is_primary_media_file)
     _music_info_from_meta = cast(

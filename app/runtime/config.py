@@ -402,6 +402,10 @@ class ConfigModel(BaseModel):
     # ==================== 音乐配置 ====================
     # 音乐封面代理地址（用于解决 coverartarchive.org 无法访问导致的封面不显示问题，留空则使用官方地址）
     MUSIC_COVER_PROXY: str = ""
+    # 是否同步整理同目录音乐封面，并在在线封面不可用时用于内嵌回退
+    MUSIC_LOCAL_COVER_ENABLE: bool = True
+    # 同目录音乐封面匹配规则，按顺序选择，逗号分隔、大小写不敏感；留空禁用本地封面
+    MUSIC_COVER_FILE_PATTERNS: str = "cover.jpg,cover.jpeg,cover.png,folder.jpg,folder.jpeg,folder.png,front.jpg,front.jpeg,front.png,*.png"
     # AcoustID 应用 API Key，用于查询本地音频的 Chromaprint 指纹
     ACOUSTID_API_KEY: str = "b1auxfOzAg"
     # 是否将识别到的音乐标题、艺术家、专辑等标准元数据转换为简体中文
@@ -727,6 +731,8 @@ class ConfigModel(BaseModel):
     PIP_PROXY: Optional[str] = ""
     # 指定的仓库Github token，多个仓库使用,分隔，格式：{user1}/{repo1}:ghp_****,{user2}/{repo2}:github_pat_****
     REPO_GITHUB_TOKEN: Optional[str] = None
+    # 社区勋章：关闭后不查询服务端开关、不拉取勋章名单；开启时仍需 MoviePilot 服务端开放该功能
+    COMMUNITY_MEDALS_ENABLE: bool = True
 
     # ==================== 飞书通知配置 ====================
     # 飞书应用 App ID
