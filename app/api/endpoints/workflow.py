@@ -1,3 +1,7 @@
+"""
+提供工作流定义、运行状态和执行控制接口。
+"""
+
 from typing import Any, List, Literal, Optional
 
 from fastapi import Depends, Response
@@ -62,7 +66,7 @@ async def list_workflows(
     return await query.list(page=page, count=count)
 
 
-@router.get(  # type: ignore[misc]
+@router.get(
     "/agent",
     summary="查询 Agent 可用工作流",
     response_model=List[_SchemaJsonObject],
@@ -78,7 +82,9 @@ async def list_agent_workflows(
     page: CompatiblePageParam = None,
     count: CompatibleCountParam = None,
 ) -> List[dict[str, Any]]:
-    """按旧 Agent 过滤与字段投影返回工作流列表，避免输出完整动作上下文。"""
+    """
+    按旧 Agent 过滤与字段投影返回工作流列表，避免输出完整动作上下文。
+    """
     state_filter = None if state == "all" else state
     trigger_filter = None if trigger_type == "all" else trigger_type
     page, count = resolve_compatible_pagination(page, count)
@@ -137,7 +143,7 @@ async def create_workflow(
     response_model=List[_SchemaPluginWorkflowActionGroup],
 )
 def list_plugin_actions(
-    plugin_id: str = None, _: Any = Depends(get_current_active_manage_user),
+    plugin_id: Optional[str] = None, _: Any = Depends(get_current_active_manage_user),
     page: CompatiblePageParam = None,
     count: CompatibleCountParam = None,
 ) -> Any:

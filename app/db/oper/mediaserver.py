@@ -1,10 +1,17 @@
-from typing import Optional, Union, cast
+"""
+媒体服务器条目缓存的数据访问入口，适配调用方会话及兼容事务执行器。
+"""
+
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.db.base import DbOper
 from app.db.models.mediaserver import MediaServerItem
+
+if TYPE_CHECKING:
+    from app.schemas.types import MediaSource
 
 
 class MediaServerOper(DbOper):
@@ -16,11 +23,13 @@ class MediaServerOper(DbOper):
         self,
         db: Optional[Union[Session, AsyncSession]] = None,
     ) -> None:
-        """保存调用方提供的同步或异步查询会话。"""
+        """
+        保存调用方提供的同步或异步查询会话。
+        """
         super().__init__(db)
 
     @staticmethod
-    def __prepare_payload(kwargs: dict) -> dict:
+    def __prepare_payload(kwargs: dict[str, Any]) -> dict[str, Any]:
         """
         过滤数据库模型不存在或不应由远端覆盖的字段
         """
@@ -31,7 +40,9 @@ class MediaServerOper(DbOper):
 
     @staticmethod
     def _contains_season(item: MediaServerItem, season: int) -> bool:
-        """兼容 JSON 往返后变为字符串的 seasoninfo 键。"""
+        """
+        兼容 JSON 往返后变为字符串的 seasoninfo 键。
+        """
         seasoninfo = item.seasoninfo or {}
         return season in seasoninfo or str(season) in seasoninfo
 
@@ -62,7 +73,7 @@ class MediaServerOper(DbOper):
             )
         return items[0] if items else None
 
-    def add(self, **kwargs) -> bool:
+    def add(self, **kwargs: Any) -> bool:
         """
         新增媒体服务器数据
         """
@@ -82,7 +93,7 @@ class MediaServerOper(DbOper):
             return True
         return False
 
-    def upsert(self, **kwargs) -> bool:
+    def upsert(self, **kwargs: Any) -> bool:
         """
         按媒体服务器和条目ID新增或更新数据
         """
@@ -104,7 +115,7 @@ class MediaServerOper(DbOper):
         self._stage_create(MediaServerItem(**kwargs))
         return True
 
-    def empty(self, server: Optional[str] = None):
+    def empty(self, server: Optional[str] = None) -> None:
         """
         清空媒体服务器数据
         """
@@ -135,7 +146,7 @@ class MediaServerOper(DbOper):
             )
         )
 
-    def exists(self, **kwargs) -> Optional[MediaServerItem]:
+    def exists(self, **kwargs: Any) -> Optional[MediaServerItem]:
         """
         判断媒体服务器数据是否存在，来源身份未命中时按标题信息跨来源回退。
         """
@@ -143,9 +154,9 @@ class MediaServerOper(DbOper):
             item = self._execute_sync_query(
                 lambda session: MediaServerItem.exist_by_media_identity(
                     session,
-                    media_source=kwargs.get("media_source"),
-                    media_id=kwargs.get("media_id"),
-                    mtype=kwargs.get("mtype"),
+                    media_source=cast("MediaSource | str", kwargs.get("media_source")),
+                    media_id=cast(str, kwargs.get("media_id")),
+                    mtype=cast(Optional[str], kwargs.get("mtype")),
                     server=kwargs.get("server"),
                 )
             )
@@ -156,9 +167,9 @@ class MediaServerOper(DbOper):
                         lambda session: MediaServerItem.list_cross_source_by_title(
                             session,
                             title=cast(str, kwargs.get("title")),
-                            mtype=kwargs.get("mtype"),
-                            year=cast(str, kwargs.get("year")),
-                            media_source=kwargs["media_source"],
+                            mtype=cast(Optional[str], kwargs.get("mtype")),
+                            year=cast(str | int, kwargs.get("year")),
+                            media_source=cast("MediaSource | str", kwargs["media_source"]),
                             server=kwargs.get("server"),
                         )
                     ),
@@ -169,9 +180,9 @@ class MediaServerOper(DbOper):
             item = self._execute_sync_query(
                 lambda session: MediaServerItem.exists_by_title(
                     session,
-                    title=kwargs.get("title"),
-                    mtype=kwargs.get("mtype"),
-                    year=kwargs.get("year"),
+                    title=cast(str, kwargs.get("title")),
+                    mtype=cast(Optional[str], kwargs.get("mtype")),
+                    year=cast(Optional[str | int], kwargs.get("year")),
                     server=kwargs.get("server"),
                 )
             )
@@ -186,7 +197,7 @@ class MediaServerOper(DbOper):
                 return None
         return item
 
-    async def async_exists(self, **kwargs) -> Optional[MediaServerItem]:
+    async def async_exists(self, **kwargs: Any) -> Optional[MediaServerItem]:
         """
         异步判断媒体服务器数据是否存在，来源身份未命中时按标题信息跨来源回退。
         """
@@ -194,9 +205,9 @@ class MediaServerOper(DbOper):
             item = await self._execute_async_query(
                 lambda session: MediaServerItem.async_exist_by_media_identity(
                     session,
-                    media_source=kwargs.get("media_source"),
-                    media_id=kwargs.get("media_id"),
-                    mtype=kwargs.get("mtype"),
+                    media_source=cast("MediaSource | str", kwargs.get("media_source")),
+                    media_id=cast(str, kwargs.get("media_id")),
+                    mtype=cast(Optional[str], kwargs.get("mtype")),
                     server=kwargs.get("server"),
                 )
             )
@@ -207,9 +218,9 @@ class MediaServerOper(DbOper):
                         lambda session: MediaServerItem.async_list_cross_source_by_title(
                             session,
                             title=cast(str, kwargs.get("title")),
-                            mtype=kwargs.get("mtype"),
-                            year=cast(str, kwargs.get("year")),
-                            media_source=kwargs["media_source"],
+                            mtype=cast(Optional[str], kwargs.get("mtype")),
+                            year=cast(str | int, kwargs.get("year")),
+                            media_source=cast("MediaSource | str", kwargs["media_source"]),
                             server=kwargs.get("server"),
                         )
                     ),
@@ -220,9 +231,9 @@ class MediaServerOper(DbOper):
             item = await self._execute_async_query(
                 lambda session: MediaServerItem.async_exists_by_title(
                     session,
-                    title=kwargs.get("title"),
-                    mtype=kwargs.get("mtype"),
-                    year=kwargs.get("year"),
+                    title=cast(str, kwargs.get("title")),
+                    mtype=cast(Optional[str], kwargs.get("mtype")),
+                    year=cast(Optional[str | int], kwargs.get("year")),
                     server=kwargs.get("server"),
                 )
             )
@@ -237,7 +248,7 @@ class MediaServerOper(DbOper):
                 return None
         return item
 
-    def get_item_id(self, **kwargs) -> Optional[str]:
+    def get_item_id(self, **kwargs: Any) -> Optional[str]:
         """
         获取媒体服务器数据ID
         """
@@ -246,7 +257,7 @@ class MediaServerOper(DbOper):
             return None
         return str(item.item_id)
 
-    async def async_get_item_id(self, **kwargs) -> Optional[str]:
+    async def async_get_item_id(self, **kwargs: Any) -> Optional[str]:
         """
         异步获取媒体服务器数据ID
         """

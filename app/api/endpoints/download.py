@@ -1,3 +1,7 @@
+"""
+提供下载任务查询、控制和手动添加接口，保留当前用户与媒体身份。
+"""
+
 from typing import Annotated, Any, List, Optional, Union
 
 import anyio
@@ -28,6 +32,9 @@ from app.domain.media import is_music_media_source, normalize_music_type
 from app.domain.meta.metabase import MetaBase
 from app.domain.metainfo import MetaInfo
 from app.schemas.common import ServiceClientInfo as _SchemaServiceClientInfo
+from app.schemas.context import MediaInfo as _SchemaMediaInfo
+from app.schemas.context import SubtitleInfo as _SchemaSubtitleInfo
+from app.schemas.context import TorrentInfo as _SchemaTorrentInfo
 from app.schemas.download import DownloadAddedData as _SchemaDownloadAddedData
 from app.schemas.download import DownloadDirectory as _SchemaDownloadDirectory
 from app.schemas.download import DownloadSourceClassificationData as _SchemaDownloadSourceClassificationData
@@ -36,12 +43,10 @@ from app.schemas.download import DownloadTaskUpdateData as _SchemaDownloadTaskUp
 from app.schemas.download import DownloadTaskUpdateRequest as _SchemaDownloadTaskUpdateRequest
 from app.schemas.download import SubtitleDownloadData as _SchemaSubtitleDownloadData
 from app.schemas.file import FileURI as _SchemaFileURI
+from app.schemas.music import MusicInfo as _SchemaMusicInfo
 from app.schemas.response import Response as _SchemaResponse
-from app.schemas.search import SubtitleInfo as _SchemaSubtitleInfo
-from app.schemas.system import TorrentInfo as _SchemaTorrentInfo
 from app.schemas.token import TokenPayload as _SchemaTokenPayload
 from app.schemas.transfer import DownloaderTorrent as _SchemaDownloaderTorrent
-from app.schemas.transfer import MusicInfo as _SchemaMusicInfo
 from app.schemas.types import (
     MUSIC_ARTIST_COLLECTION_CATEGORY,
     MUSIC_ENTITY_ARTIST,
@@ -51,7 +56,6 @@ from app.schemas.types import (
     MusicTargetEntityType,
     SystemConfigKey,
 )
-from app.schemas.workflow import MediaInfo as _SchemaMediaInfo
 
 router = ResponseAPIRouter()
 
@@ -129,8 +133,11 @@ def _resolve_add_media(
     media_id: str | None,
     music_type: MusicTargetEntityType | None,
     allow_unrecognized: bool,
-) -> tuple[MetaBase | None, MediaInfo | MusicInfo | None, _SchemaResponse | None]:
-    """校验媒体身份并为无媒体信息下载构建识别上下文。"""
+) -> tuple[MetaBase | None, MediaInfo | MusicInfo | None,
+           _SchemaResponse[_SchemaDownloadAddedData] | None]:
+    """
+    校验媒体身份并为无媒体信息下载构建识别上下文。
+    """
     normalized_music_type = normalize_music_type(music_type, allow_artist=False)
     if music_type is not None and not normalized_music_type:
         return (
@@ -255,7 +262,7 @@ def download(
     return _SchemaResponse(success=True, data={"download_id": did})
 
 
-@router.post(  # type: ignore[misc]
+@router.post(
     "/artist-collection",
     summary="添加艺术家合集下载",
     response_model=_SchemaResponse[_SchemaDownloadAddedData],
@@ -269,13 +276,20 @@ def download_artist_collection(
     save_path: Annotated[str | None, Body()] = None,
     current_user: ApiPrincipal = Depends(get_current_active_user),
 ) -> Any:
-    """Add one artist-wide torrent without pretending that it is one album.
+    """
+    按艺术家身份添加一个合集种子，不将其伪装为单张专辑。
 
-    The artist identity remains available for history and subsequent collection
-    organization.  ``library_category`` is an intentional download-directory
-    classification snapshot: when resource category folders are enabled the
-    task starts under ``Artist Collection`` and therefore never needs an
-    out-of-band filesystem move that could break seeding.
+    艺术家身份保留到下载历史和后续合集整理中。library_category 是下载目录分类快照；
+    启用资源分类子目录时，任务直接下载到 Artist Collection 下，避免事后移动文件破坏做种。
+
+    :param artist_name: 艺术家名称，会去除首尾空白
+    :param artist_id: 对应音乐来源中的艺术家标识
+    :param media_source: 提供艺术家身份的音乐元数据来源
+    :param torrent_in: 待下载的种子信息
+    :param downloader: 指定下载器，None 使用默认选择
+    :param save_path: 指定下载目录，None 使用配置目录
+    :param current_user: 经过认证的操作用户，作为下载历史归属
+    :return: 下载添加结果，成功时包含下载任务标识
     """
     name = artist_name.strip()
     identity = artist_id.strip()
@@ -428,7 +442,7 @@ def stop(
     return _SchemaResponse(success=True if ret else False)
 
 
-@router.patch(  # type: ignore[misc]
+@router.patch(
     "/{hashString}",
     summary="高级更新下载任务",
     response_model=_SchemaResponse[_SchemaDownloadTaskUpdateData],
@@ -438,7 +452,9 @@ async def update_task(
     payload: _SchemaDownloadTaskUpdateRequest,
     _: ApiPrincipal = Depends(get_current_active_manage_user),
 ) -> _SchemaResponse[Any]:
-    """由管理用户执行下载任务启停、标签、限速、Tracker 和保存位置修改。"""
+    """
+    由管理用户执行下载任务启停、标签、限速、Tracker 和保存位置修改。
+    """
     chain = DownloadChain()
     service = DownloadTaskMutationService(
         list_torrents=chain.list_torrents,
@@ -461,7 +477,7 @@ async def update_task(
     )
 
 
-@router.post(  # type: ignore[misc]
+@router.post(
     "/{hashString}/classify-source",
     summary="识别并归类已有下载任务",
     response_model=_SchemaResponse[_SchemaDownloadSourceClassificationData],
@@ -471,7 +487,9 @@ async def classify_source(
     payload: _SchemaDownloadSourceClassificationRequest,
     _: ApiPrincipal = Depends(get_current_active_manage_user),
 ) -> _SchemaResponse[Any]:
-    """复用媒体识别链生成资源目录和根目录名，确认后仅通过下载器执行。"""
+    """
+    复用媒体识别链生成资源目录和根目录名，确认后仅通过下载器执行。
+    """
     chain = DownloadChain()
     try:
         data = await anyio.to_thread.run_sync(
@@ -489,9 +507,14 @@ async def classify_source(
 )
 async def clients(_: _SchemaTokenPayload = Depends(verify_token), page: CompatiblePageParam = None, count: CompatibleCountParam = None) -> Any:
     """
-    查询可用下载器
+    查询已启用的下载器名称与类型。
+
+    :param _: 已验证的访问令牌
+    :param page: 兼容客户端的分页参数，此接口不据此分页
+    :param count: 兼容客户端的数量参数，此接口不据此截断
+    :return: 已启用下载器的名称和类型列表
     """
-    downloaders: List[dict] = get_configured_system_config().get(SystemConfigKey.Downloaders)
+    downloaders: List[dict[str, object]] = get_configured_system_config().get(SystemConfigKey.Downloaders)
     if downloaders:
         return [{"name": d.get("name"), "type": d.get("type")} for d in downloaders if d.get("enabled")]
     return []

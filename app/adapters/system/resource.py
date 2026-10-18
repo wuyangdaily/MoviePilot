@@ -1,4 +1,6 @@
-"""站点认证与索引资源的版本检查和离线下载适配器。"""
+"""
+站点认证与索引资源的版本检查和离线下载适配器。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ import platform
 import sys
 import sysconfig
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from app.adapters.network.http import RequestUtils
 from app.adapters.system.host import SystemUtils
@@ -16,11 +18,16 @@ from app.foundation.version import compare_version
 from app.runtime.log import logger
 from app.runtime.settings import get_runtime_setting
 
+if TYPE_CHECKING:
+    from requests import Response
+
 ResourceVersionProvider = Callable[[], tuple[str, str]]
 
 
 def _unavailable_resource_versions() -> tuple[str, str]:
-    """站点能力尚未装配时返回可安全比较的空版本。"""
+    """
+    站点能力尚未装配时返回可安全比较的空版本。
+    """
     return "0", "0"
 
 
@@ -28,28 +35,37 @@ _resource_version_provider: ResourceVersionProvider = _unavailable_resource_vers
 
 
 def configure_resource_version_provider(provider: ResourceVersionProvider) -> None:
-    """由组合根注入已加载的认证与索引版本，保持适配器不依赖应用层。"""
+    """
+    由组合根注入已加载的认证与索引版本，保持适配器不依赖应用层。
+    """
     global _resource_version_provider
     _resource_version_provider = provider
 
 
 def reset_resource_version_provider() -> None:
-    """撤销当前 lifespan 的资源版本来源，恢复安全空版本。"""
+    """
+    撤销当前 lifespan 的资源版本来源，恢复安全空版本。
+    """
     global _resource_version_provider
     _resource_version_provider = _unavailable_resource_versions
 
 
 def get_resource_versions() -> tuple[str, str]:
-    """读取当前进程已加载的认证资源版本和索引资源版本。"""
+    """
+    读取当前进程已加载的认证资源版本和索引资源版本。
+    """
     try:
         return _resource_version_provider()
-    except Exception as error:  # noqa: BLE001  版本读取失败时不能阻断系统状态接口
+    # 版本读取失败时不能阻断系统状态接口
+    except Exception as error:  # noqa: BLE001
         logger.warning(f"读取站点资源版本失败：{error}")
         return _unavailable_resource_versions()
 
 
 class ResourceHelper:
-    """检查站点资源版本，并把待更新文件下载到外部暂存目录。"""
+    """
+    检查站点资源版本，并把待更新文件下载到外部暂存目录。
+    """
 
     _base_dir: Path = get_runtime_setting("ROOT_PATH")
     _resource_target = Path("app/application/site")
@@ -64,24 +80,31 @@ class ResourceHelper:
     )
 
     @property
-    def proxies(self):
-        """返回访问 GitHub 资源时应使用的代理配置。"""
-        return (
+    def proxies(self) -> Optional[dict[str, str]]:
+        """
+        返回访问 GitHub 资源时应使用的代理配置。
+        """
+        proxies: Optional[dict[str, str]] = (
             None
             if get_runtime_setting("GITHUB_PROXY")
             else get_runtime_setting("PROXY")
         )
+        return proxies
 
     @staticmethod
     def _get_python_version_tag() -> str:
-        """返回资源文件名使用的 CPython ABI 标签。"""
+        """
+        返回资源文件名使用的 CPython ABI 标签。
+        """
         version = sys.version_info
         free_threaded = "t" if sysconfig.get_config_var("Py_GIL_DISABLED") else ""
         return f"cp{version.major}{version.minor}{free_threaded}"
 
     @staticmethod
     def _get_machine_tag() -> str:
-        """将系统架构名称归一为资源文件使用的标签。"""
+        """
+        将系统架构名称归一为资源文件使用的标签。
+        """
         machine = platform.machine().lower()
         if machine in {"arm64", "aarch64"}:
             return "aarch64"
@@ -91,7 +114,9 @@ class ResourceHelper:
 
     @classmethod
     def _get_needed_files(cls) -> list[str]:
-        """返回 V3 资源在当前平台需要下载的文件名。"""
+        """
+        返回 V3 资源在当前平台需要下载的文件名。
+        """
         python_version = cls._get_python_version_tag()
         python_ver = python_version.replace("cp", "")
         system = platform.system().lower()
@@ -105,9 +130,11 @@ class ResourceHelper:
             files.append(f"sites.cp{python_ver}-win_amd64.pyd")
         return files
 
-    def _load_resource_info(self):
-        """读取 V3 资源清单。"""
-        response = RequestUtils(
+    def _load_resource_info(self) -> Optional[Response]:
+        """
+        读取 V3 资源清单。
+        """
+        response: Optional[Response] = RequestUtils(
             proxies=self.proxies,
             headers=get_runtime_setting("GITHUB_HEADERS"),
             timeout=10,
@@ -120,7 +147,8 @@ class ResourceHelper:
         auth_version: str | None = None,
         indexer_version: str | None = None,
     ) -> dict[str, Any] | None:
-        """读取当前平台的资源更新元数据，但不写入运行目录。
+        """
+        读取当前平台的资源更新元数据，但不写入运行目录。
 
         :param auth_version: 当前认证资源版本；省略时使用组合根注入值
         :param indexer_version: 当前索引资源版本；省略时使用组合根注入值
@@ -200,7 +228,9 @@ class ResourceHelper:
         }
 
     def get_download_files(self, update_info: dict[str, Any]) -> list[dict[str, Any]]:
-        """解析资源目录 API，补齐每个待下载文件的地址和大小。"""
+        """
+        解析资源目录 API，补齐每个待下载文件的地址和大小。
+        """
         response = RequestUtils(
             proxies=get_runtime_setting("PROXY"),
             headers=get_runtime_setting("GITHUB_HEADERS"),
@@ -236,7 +266,9 @@ class ResourceHelper:
         destination_dir: Path,
         on_progress: Callable[[int, int], None] | None = None,
     ) -> list[dict[str, Any]]:
-        """把资源文件下载到暂存目录并返回带 SHA256 的安装清单。"""
+        """
+        把资源文件下载到暂存目录并返回带 SHA256 的安装清单。
+        """
         destination_dir.mkdir(parents=True, exist_ok=True)
         prepared: list[dict[str, Any]] = []
         for resource in files:
@@ -286,18 +318,23 @@ class ResourceHelper:
         auth_version: str | None = None,
         indexer_version: str | None = None,
     ) -> bool:
-        """检查是否存在资源更新，不在运行目录直接安装资源。"""
+        """
+        检查是否存在资源更新，不在运行目录直接安装资源。
+        """
         try:
             return self.get_update_info(
                 auth_version=auth_version,
                 indexer_version=indexer_version,
             ) is not None
-        except Exception as error:  # noqa: BLE001  定时检查失败必须保持静默
+        # 定时检查失败必须保持静默
+        except Exception as error:  # noqa: BLE001
             logger.warning(f"检查站点资源更新失败：{error}")
             return False
 
     @staticmethod
     def _proxied(url: str) -> str:
-        """为资源直链添加 GitHub 代理前缀。"""
+        """
+        为资源直链添加 GitHub 代理前缀。
+        """
         proxy = str(get_runtime_setting("GITHUB_PROXY") or "").strip()
         return f"{proxy}{url}" if proxy else url

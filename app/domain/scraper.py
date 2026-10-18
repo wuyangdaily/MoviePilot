@@ -1,3 +1,7 @@
+"""
+读取 Kodi 风格媒体 NFO，并按标准媒体信息构造元数据文档和图片清单。
+"""
+
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Optional
@@ -10,27 +14,35 @@ from app.schemas.types import MediaSource, MediaType
 
 
 class NfoReader:
-    """读取 Kodi 风格 NFO XML 中的元素值。"""
+    """
+    读取 Kodi 风格 NFO XML 中的元素值。
+    """
 
-    def __init__(self, xml_file_path: Path):
-        """解析指定 NFO 文件并保存根元素。"""
+    def __init__(self, xml_file_path: Path) -> None:
+        """
+        解析指定 NFO 文件并保存根元素。
+        """
         self.xml_file_path = xml_file_path
         self.tree = ET.parse(xml_file_path)
         self.root = self.tree.getroot()
 
-    def get_element_value(self, element_path) -> Optional[str]:
-        """返回首个匹配元素的文本。"""
+    def get_element_value(self, element_path: str) -> Optional[str]:
+        """
+        返回首个匹配元素的文本。
+        """
         element = self.root.find(element_path)
         return element.text if element is not None else None
 
-    def get_elements(self, element_path) -> List[ET.Element]:
-        """返回路径匹配的全部 XML 元素。"""
+    def get_elements(self, element_path: str) -> List[ET.Element]:
+        """
+        返回路径匹配的全部 XML 元素。
+        """
         return self.root.findall(element_path)
 
 
 class MediaScraperHelper:
     """
-    基于统一媒体信息生成通用 NFO 与图片清单，供缺少专用刮削格式的数据源复用
+    基于统一媒体信息生成通用 NFO 与图片清单，供缺少专用刮削格式的数据源复用。
     """
 
     @staticmethod
@@ -61,7 +73,7 @@ class MediaScraperHelper:
         cls,
         mediainfo: MediaInfo,
         doc: minidom.Document,
-        root: minidom.Node,
+        root: minidom.Element,
     ) -> None:
         """
         向 NFO 根节点写入各媒体类型共享的标准字段。
@@ -135,7 +147,7 @@ class MediaScraperHelper:
         :param mediainfo: 统一媒体信息
         :param season: 季号
         :param episode: 集号
-        :return: NFO XML 文本
+        :return: UTF-8 编码声明的 NFO XML 文本；媒体信息为空时返回 None
         """
         if not mediainfo:
             return None
@@ -165,7 +177,7 @@ class MediaScraperHelper:
             DomUtils.add_node(doc, root, "season", "-1")
             DomUtils.add_node(doc, root, "episode", "-1")
 
-        return doc.toprettyxml(indent="  ", encoding="utf-8")
+        return doc.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
 
     @classmethod
     def get_metadata_img(
@@ -173,7 +185,7 @@ class MediaScraperHelper:
         mediainfo: MediaInfo,
         season: Optional[int] = None,
         episode: Optional[int] = None,
-    ) -> dict:
+    ) -> dict[str, str]:
         """
         根据统一媒体信息生成主海报和背景图下载清单。
 

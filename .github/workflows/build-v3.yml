@@ -12,7 +12,49 @@ permissions:
   packages: write
 
 jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.detect.outputs.publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Detect version change
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          versions() {
+            sed -nE "s/^(APP_VERSION|FRONTEND_VERSION)[[:space:]]*=[[:space:]]*'([^']+)'[[:space:]]*$/\1=\2/p" | sort
+          }
+          previous=$(git show "$BEFORE_SHA:version.py" | versions)
+          current=$(versions < version.py)
+          for value in APP_VERSION FRONTEND_VERSION; do
+            if ! printf '%s\n' "$previous" | grep -q "^${value}=" ||
+               ! printf '%s\n' "$current" | grep -q "^${value}="; then
+              echo "版本声明缺失: $value" >&2
+              exit 1
+            fi
+          done
+          if [ "$previous" = "$current" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   Docker-build:
+    needs: release-gate
+    if: needs.release-gate.outputs.publish == 'true'
     runs-on: ubuntu-latest
     name: Build Docker Image
     steps:
@@ -111,7 +153,7 @@ jobs:
             --connect-timeout 10 --max-time 120 \
             "https://models.dev/api.json" -o "$temp_file"
           jq -e 'type == "object"' "$temp_file" >/dev/null
-          # Git keeps only a small placeholder; the release image receives the current catalog.
+          # 仓库仅保留少量占位数据，发布镜像构建时下载最新模型清单。
           chmod 644 "$temp_file"
           mv "$temp_file" app/agent/llm/resources/models.json
           echo "digest=sha256:$(sha256sum app/agent/llm/resources/models.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"

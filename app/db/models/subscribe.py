@@ -1,8 +1,14 @@
+"""
+影视与音乐订阅配置及状态的 ORM 模型与会话内数据操作。
+
+会话及事务由调用方管理，本模块不负责提交或回滚。
+"""
+
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Self
 from uuid import uuid4
 
-from sqlalchemy import JSON, Float, Index, Integer, String, or_, select
+from sqlalchemy import JSON, ColumnElement, Float, Index, Integer, String, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -133,11 +139,13 @@ class Subscribe(Base):
     @classmethod
     def _identity_condition(
         cls,
-        media_source: Optional[MediaSource] = None,
+        media_source: MediaSource | str | None = None,
         media_id: Optional[str] = None,
         music_type: Optional[str] = None,
-    ):
-        """按统一媒体身份优先级构造订阅查询条件。"""
+    ) -> Optional[ColumnElement[bool]]:
+        """
+        按统一媒体身份优先级构造订阅查询条件。
+        """
         if not media_source or media_id is None or not str(media_id).strip():
             return None
         condition = (cls.media_source == str(media_source)) & (cls.media_id == str(media_id).strip())
@@ -156,15 +164,18 @@ class Subscribe(Base):
         season: Optional[int] = None,
         episode_group: Optional[str] = None,
         music_type: Optional[str] = None,
-    ):
-        """按媒体身份、季号与剧集组查询已有订阅。"""
+    ) -> Optional[Self]:
+        """
+        按媒体身份、季号与剧集组查询已有订阅。
+        """
         condition = cls._identity_condition(media_source, media_id, music_type)
         if condition is None:
             return None
         statement = select(cls).where(condition)
         if season is not None:
             statement = statement.where(cls.season == season)
-        return db.execute(statement.where(cls.episode_group == episode_group)).scalars().first()
+        subscription: Optional[Self] = db.execute(statement.where(cls.episode_group == episode_group)).scalars().first()
+        return subscription
 
     @classmethod
     async def async_exists(
@@ -175,8 +186,10 @@ class Subscribe(Base):
         season: Optional[int] = None,
         episode_group: Optional[str] = None,
         music_type: Optional[str] = None,
-    ):
-        """异步按媒体身份、季号与剧集组查询已有订阅。"""
+    ) -> Optional[Self]:
+        """
+        异步按媒体身份、季号与剧集组查询已有订阅。
+        """
         condition = cls._identity_condition(media_source, media_id, music_type)
         if condition is None:
             return None
@@ -184,7 +197,8 @@ class Subscribe(Base):
         if season is not None:
             statement = statement.where(cls.season == season)
         result = await db.execute(statement.where(cls.episode_group == episode_group))
-        return result.scalars().first()
+        subscription: Optional[Self] = result.scalars().first()
+        return subscription
 
     @classmethod
     def exists_by_username(
@@ -196,7 +210,7 @@ class Subscribe(Base):
         season: Optional[int] = None,
         episode_group: Optional[str] = None,
         music_type: Optional[str] = None,
-    ):
+    ) -> Optional[Self]:
         """
         按订阅 owner、媒体身份、季号与剧集组查询订阅行。
         """
@@ -208,7 +222,8 @@ class Subscribe(Base):
         statement = select(cls).where(cls.username == username, condition)
         if season is not None:
             statement = statement.where(cls.season == season)
-        return db.execute(statement.where(cls.episode_group == episode_group)).scalars().first()
+        subscription: Optional[Self] = db.execute(statement.where(cls.episode_group == episode_group)).scalars().first()
+        return subscription
 
     @classmethod
     async def async_exists_by_username(
@@ -220,7 +235,7 @@ class Subscribe(Base):
         season: Optional[int] = None,
         episode_group: Optional[str] = None,
         music_type: Optional[str] = None,
-    ):
+    ) -> Optional[Self]:
         """
         异步按订阅 owner、媒体身份、季号与剧集组查询订阅行。
         """
@@ -233,19 +248,24 @@ class Subscribe(Base):
         if season is not None:
             statement = statement.where(cls.season == season)
         result = await db.execute(statement.where(cls.episode_group == episode_group))
-        return result.scalars().first()
+        subscription: Optional[Self] = result.scalars().first()
+        return subscription
 
     @classmethod
-    def get_by_state(cls, db: Session, state: str | None = None):
-        """在调用方 Session 中按状态列表查询订阅。"""
+    def get_by_state(cls, db: Session, state: str | None = None) -> list[Self]:
+        """
+        在调用方 Session 中按状态列表查询订阅。
+        """
         statement = select(cls)
         if state:
             statement = statement.where(cls.state.in_(state.split(",")))
         return list(db.execute(statement).scalars().all())
 
     @classmethod
-    async def async_get_by_state(cls, db: AsyncSession, state: str | None = None):
-        """在调用方 AsyncSession 中按状态列表查询订阅。"""
+    async def async_get_by_state(cls, db: AsyncSession, state: str | None = None) -> list[Self]:
+        """
+        在调用方 AsyncSession 中按状态列表查询订阅。
+        """
         statement = select(cls)
         if state:
             statement = statement.where(cls.state.in_(state.split(",")))
@@ -258,12 +278,15 @@ class Subscribe(Base):
         db: Session,
         title: str,
         season: Optional[int] = None,
-    ):
-        """在调用方 Session 中按标题查询订阅。"""
+    ) -> Optional[Self]:
+        """
+        在调用方 Session 中按标题查询订阅。
+        """
         statement = select(cls).where(cls.name == title)
         if season is not None:
             statement = statement.where(cls.season == season)
-        return db.execute(statement).scalars().first()
+        subscription: Optional[Self] = db.execute(statement).scalars().first()
+        return subscription
 
     @classmethod
     async def async_get_by_title(
@@ -271,13 +294,16 @@ class Subscribe(Base):
         db: AsyncSession,
         title: str,
         season: Optional[int] = None,
-    ):
-        """在调用方 AsyncSession 中按标题查询订阅。"""
+    ) -> Optional[Self]:
+        """
+        在调用方 AsyncSession 中按标题查询订阅。
+        """
         statement = select(cls).where(cls.name == title)
         if season is not None:
             statement = statement.where(cls.season == season)
         result = await db.execute(statement)
-        return result.scalars().first()
+        subscription: Optional[Self] = result.scalars().first()
+        return subscription
 
     @classmethod
     async def async_list_by_title(
@@ -285,8 +311,10 @@ class Subscribe(Base):
         db: AsyncSession,
         title: str,
         season: Optional[int] = None,
-    ):
-        """在调用方 AsyncSession 中按标题查询候选订阅列表。"""
+    ) -> list[Self]:
+        """
+        在调用方 AsyncSession 中按标题查询候选订阅列表。
+        """
         statement = select(cls).where(cls.name == title)
         if season is not None:
             statement = statement.where(cls.season == season)
@@ -300,8 +328,10 @@ class Subscribe(Base):
         media_source: MediaSource | str | None = None,
         media_id: str | None = None,
         music_type: Optional[str] = None,
-    ):
-        """同步按统一媒体身份查询候选订阅列表。"""
+    ) -> list[Self]:
+        """
+        同步按统一媒体身份查询候选订阅列表。
+        """
         condition = cls._identity_condition(
             media_source=media_source,
             media_id=media_id,
@@ -318,8 +348,10 @@ class Subscribe(Base):
         media_source: MediaSource | str | None = None,
         media_id: str | None = None,
         music_type: Optional[str] = None,
-    ):
-        """异步按统一媒体身份查询候选订阅列表。"""
+    ) -> list[Self]:
+        """
+        异步按统一媒体身份查询候选订阅列表。
+        """
         condition = cls._identity_condition(
             media_source=media_source,
             media_id=media_id,
@@ -339,7 +371,7 @@ class Subscribe(Base):
         media_id: str | None = None,
         season: Optional[int] = None,
         music_type: Optional[str] = None,
-    ):
+    ) -> Optional[Self]:
         """
         根据条件查询订阅
         """
@@ -349,7 +381,8 @@ class Subscribe(Base):
         statement = select(cls).where(condition, cls.type == type)
         if season is not None:
             statement = statement.where(cls.season == season)
-        return db.execute(statement).scalars().first()
+        subscription: Optional[Self] = db.execute(statement).scalars().first()
+        return subscription
 
     @classmethod
     async def async_get_by(
@@ -360,7 +393,7 @@ class Subscribe(Base):
         media_id: str | None = None,
         season: Optional[int] = None,
         music_type: Optional[str] = None,
-    ):
+    ) -> Optional[Self]:
         """
         根据条件查询订阅
         """
@@ -371,11 +404,14 @@ class Subscribe(Base):
         if season is not None:
             query = query.filter(cls.season == season)
         result = await db.execute(query)
-        return result.scalars().first()
+        subscription: Optional[Self] = result.scalars().first()
+        return subscription
 
     @classmethod
-    def list_by_username(cls, db: Session, username: str, state: Optional[str] = None, mtype: Optional[str] = None):
-        """在调用方 Session 中按用户筛选订阅。"""
+    def list_by_username(cls, db: Session, username: str, state: Optional[str] = None, mtype: Optional[str] = None) -> list[Self]:
+        """
+        在调用方 Session 中按用户筛选订阅。
+        """
         statement = select(cls).where(cls.username == username)
         if state:
             statement = statement.where(cls.state == state)
@@ -386,8 +422,10 @@ class Subscribe(Base):
     @classmethod
     async def async_list_by_username(
         cls, db: AsyncSession, username: str, state: Optional[str] = None, mtype: Optional[str] = None
-    ):
-        """在调用方 AsyncSession 中按用户筛选订阅。"""
+    ) -> list[Self]:
+        """
+        在调用方 AsyncSession 中按用户筛选订阅。
+        """
         statement = select(cls).where(cls.username == username)
         if state:
             statement = statement.where(cls.state == state)
@@ -397,8 +435,10 @@ class Subscribe(Base):
         return list(result.scalars().all())
 
     @classmethod
-    def list_by_type(cls, db: Session, mtype: str, days: int = 7):
-        """在调用方 Session 中按类型查询最近时间窗内的订阅。"""
+    def list_by_type(cls, db: Session, mtype: str, days: int = 7) -> list[Self]:
+        """
+        在调用方 Session 中按类型查询最近时间窗内的订阅。
+        """
         return list(
             db.execute(
                 select(cls).where(
@@ -411,8 +451,10 @@ class Subscribe(Base):
         )
 
     @classmethod
-    async def async_list_by_type(cls, db: AsyncSession, mtype: str, days: int = 7):
-        """在调用方 AsyncSession 中按类型查询最近时间窗内的订阅。"""
+    async def async_list_by_type(cls, db: AsyncSession, mtype: str, days: int = 7) -> list[Self]:
+        """
+        在调用方 AsyncSession 中按类型查询最近时间窗内的订阅。
+        """
         result = await db.execute(
             select(cls).where(
                 cls.type == mtype,

@@ -1,4 +1,6 @@
-"""LLM模型相关辅助功能"""
+"""
+LLM模型相关辅助功能
+"""
 
 import asyncio
 import inspect
@@ -17,6 +19,8 @@ from app.runtime.settings import get_runtime_setting
 from app.runtime.thread import ThreadHelper
 
 if TYPE_CHECKING:
+    import httpx
+
     from app.agent.llm.tools import ServerToolResolution
 
 
@@ -24,24 +28,32 @@ _TEMPERATURE_UNSET = object()
 
 
 class LLMTestError(RuntimeError):
-    """LLM 测试调用异常，附带请求耗时。"""
+    """
+    LLM 测试调用异常，附带请求耗时。
+    """
 
-    def __init__(self, message: str, duration_ms: int | None = None):
-        """保存测试错误与本次请求耗时。"""
+    def __init__(self, message: str, duration_ms: int | None = None) -> None:
+        """
+        保存测试错误与本次请求耗时。
+        """
         super().__init__(message)
         self.duration_ms = duration_ms
 
 
 class LLMTestTimeout(TimeoutError):
-    """LLM 测试调用超时，附带请求耗时。"""
+    """
+    LLM 测试调用超时，附带请求耗时。
+    """
 
-    def __init__(self, message: str, duration_ms: int | None = None):
-        """保存超时错误与本次请求耗时。"""
+    def __init__(self, message: str, duration_ms: int | None = None) -> None:
+        """
+        保存超时错误与本次请求耗时。
+        """
         super().__init__(message)
         self.duration_ms = duration_ms
 
 
-def _patch_gemini_thought_signature():
+def _patch_gemini_thought_signature() -> None:
     """
     修复 langchain-google-genai 中 Gemini 2.5 思考模型的 thought_signature 兼容问题。
 
@@ -89,7 +101,9 @@ def _patch_gemini_thought_signature():
         # 补丁 1：扩展 _is_gemini_3_or_later，使 Gemini 2.5 模型也能触发
         # _parse_chat_history 中的 thought_signature 强制注入逻辑
         def _patched_is_gemini_3_or_later(model_name: str) -> bool:
-            """让 Gemini 2.5 与 3 系列共享工具调用签名兼容逻辑。"""
+            """
+            让 Gemini 2.5 与 3 系列共享工具调用签名兼容逻辑。
+            """
             if not model_name:
                 return False
             name = model_name.lower().replace("models/", "")
@@ -103,7 +117,9 @@ def _patch_gemini_thought_signature():
         _original_parse_chat_history = _cm._parse_chat_history  # noqa
 
         def _patched_parse_chat_history(*args, **kwargs):
-            """为同一消息中的每个 Gemini 工具调用补齐缺失签名。"""
+            """
+            为同一消息中的每个 Gemini 工具调用补齐缺失签名。
+            """
             result = _original_parse_chat_history(*args, **kwargs)
             system_instruction, formatted_messages = result
 
@@ -183,7 +199,7 @@ def _build_httpx_client(
         *,
         async_client: bool = False,
         timeout: float | None = None,
-):
+) -> "httpx.Client | httpx.AsyncClient":
     """
     构造显式代理策略的 httpx 客户端。
 
@@ -246,7 +262,9 @@ _THINKING_CONTENT_BLOCK_TYPES = frozenset(
 
 
 def _is_thinking_content_block(value: Any) -> bool:
-    """识别承载供应商思考协议的内容分块。"""
+    """
+    识别承载供应商思考协议的内容分块。
+    """
     return (
         isinstance(value, dict)
         and str(value.get("type") or "").strip().lower()
@@ -305,7 +323,9 @@ def _patch_interleaved_reasoning_request_support(
         normalize_deepseek_messages: bool = False,
         inject_missing_as_empty: bool = False,
 ) -> None:
-    """为兼容模型统一补回工具调用历史中的 reasoning_content 和思考分块。"""
+    """
+    为兼容模型统一补回工具调用历史中的 reasoning_content 和思考分块。
+    """
     if getattr(model_cls, patch_marker, False):
         return
 
@@ -318,7 +338,9 @@ def _patch_interleaved_reasoning_request_support(
 
     @wraps(original_get_request_payload)
     def _patched_get_request_payload(self, input_, *, stop=None, **kwargs):
-        """按模型思考协议把历史消息中的思考内容补回出站请求。"""
+        """
+        按模型思考协议把历史消息中的思考内容补回出站请求。
+        """
         payload = original_get_request_payload(self, input_, stop=stop, **kwargs)
         if "messages" not in payload:
             return payload
@@ -374,7 +396,7 @@ def _patch_interleaved_reasoning_request_support(
     setattr(model_cls, patch_marker, True)
 
 
-def _patch_openai_interleaved_reasoning_content_support():
+def _patch_openai_interleaved_reasoning_content_support() -> None:
     """
     修补 OpenAI-compatible 模型的 interleaved reasoning 内容回传。
 
@@ -404,7 +426,9 @@ def _patch_openai_interleaved_reasoning_content_support():
         if callable(original_convert_dict):
             @wraps(original_convert_dict)
             def _patched_convert_dict_to_message(message_dict):
-                """保留普通响应中的 reasoning_content 以供后续工具轮次复用。"""
+                """
+                保留普通响应中的 reasoning_content 以供后续工具轮次复用。
+                """
                 message = original_convert_dict(message_dict)
                 if (
                         isinstance(message, AIMessage)
@@ -420,7 +444,9 @@ def _patch_openai_interleaved_reasoning_content_support():
         if callable(original_convert_delta):
             @wraps(original_convert_delta)
             def _patched_convert_delta_to_message_chunk(delta, default_class):
-                """保留流式思考增量，避免聚合后丢失工具轮次所需的思考内容。"""
+                """
+                保留流式思考增量，避免聚合后丢失工具轮次所需的思考内容。
+                """
                 chunk = original_convert_delta(delta, default_class)
                 if (
                         isinstance(chunk, AIMessageChunk)
@@ -444,7 +470,7 @@ def _patch_openai_interleaved_reasoning_content_support():
     logger.debug("已修补 langchain-openai interleaved reasoning_content 回传兼容性")
 
 
-def _patch_openai_responses_instructions_support():
+def _patch_openai_responses_instructions_support() -> None:
     """
     修补 langchain-openai 在使用 use_responses_api=True 时，
     提取 system 消息为顶层 instructions 字段。
@@ -470,7 +496,9 @@ def _patch_openai_responses_instructions_support():
 
     @wraps(original_get_request_payload)
     def _patched_get_request_payload(self, input_, *, stop=None, **kwargs):
-        """适配 Copilot 与 Codex 端点的参数限制及 Responses 系统指令。"""
+        """
+        适配 Copilot 与 Codex 端点的参数限制及 Responses 系统指令。
+        """
         payload = original_get_request_payload(self, input_, stop=stop, **kwargs)
 
         base_url = str(getattr(self, "openai_api_base", "") or "").lower()
@@ -519,7 +547,7 @@ def _patch_openai_responses_instructions_support():
     logger.debug("已修补 langchain-openai responses API 的 instructions 兼容性")
 
 
-def _patch_openai_responses_empty_output_support():
+def _patch_openai_responses_empty_output_support() -> None:
     """
     修补 langchain-openai Responses API 流式完成事件 output 为空的兼容性。
 
@@ -544,7 +572,7 @@ def _patch_openai_responses_empty_output_support():
         logger.warning("langchain-openai 缺少 Responses API 结果构造函数，无法修补 output")
         return
 
-    def _clone_response_with_empty_output(response):
+    def _clone_response_with_empty_output(response: object) -> object:
         """
         复制 Responses 对象，把缺失 output 规整为空列表。
         """
@@ -584,13 +612,17 @@ _SCHEMA_UNION_KEYWORDS = ("anyOf", "oneOf")
 
 
 def _schema_variant_type(variant: Any) -> str | None:
-    """返回联合分支声明的单一 JSON 类型，无法确定时返回 None。"""
+    """
+    返回联合分支声明的单一 JSON 类型，无法确定时返回 None。
+    """
     schema_type = variant.get("type") if isinstance(variant, dict) else None
     return schema_type if isinstance(schema_type, str) else None
 
 
 def _collapse_schema_union(schema: dict[str, Any], *, gemini_compatible: bool) -> dict[str, Any]:
-    """把不带顶层 type 的 anyOf/oneOf 折叠为单一分支，字段级关键字优先保留。"""
+    """
+    把不带顶层 type 的 anyOf/oneOf 折叠为单一分支，字段级关键字优先保留。
+    """
     if "type" in schema:
         return schema
     for keyword in _SCHEMA_UNION_KEYWORDS:
@@ -612,7 +644,9 @@ def _collapse_schema_union(schema: dict[str, Any], *, gemini_compatible: bool) -
 
 
 def _infer_gemini_schema_type(schema: dict[str, Any]) -> dict[str, Any]:
-    """为 Gemini 补齐无法从联合推断类型的节点，默认 string 与原生转换一致。"""
+    """
+    为 Gemini 补齐无法从联合推断类型的节点，默认 string 与原生转换一致。
+    """
     if "type" in schema or any(key in schema for key in ("$ref", *_SCHEMA_LIST_KEYWORDS)):
         return schema
     if "properties" in schema:
@@ -640,7 +674,9 @@ def _normalize_tool_schema(schema: Any, *, gemini_compatible: bool) -> Any:
         return schema
 
     def _normalize(child: Any) -> Any:
-        """按同一模型兼容策略递归处理子节点。"""
+        """
+        按同一模型兼容策略递归处理子节点。
+        """
         return _normalize_tool_schema(child, gemini_compatible=gemini_compatible)
 
     normalized: dict[str, Any] = {}
@@ -662,7 +698,9 @@ def _normalize_tool_schema(schema: Any, *, gemini_compatible: bool) -> Any:
 
 
 def _normalize_function_tool(tool: Any, *, gemini_compatible: bool) -> Any:
-    """规整 Chat Completions 或 Responses 格式的函数工具；strict 工具保持原样。"""
+    """
+    规整 Chat Completions 或 Responses 格式的函数工具；strict 工具保持原样。
+    """
     if not isinstance(tool, dict) or tool.get("type") != "function":
         return tool
     function = tool.get("function")
@@ -698,7 +736,9 @@ def _patch_tool_schema_request_support(model_cls: Any, *, patch_marker: str) -> 
 
     @wraps(original_get_request_payload)
     def _patched_get_request_payload(self: Any, input_: Any, *, stop: Any = None, **kwargs: Any) -> Any:
-        """按模型规整出站工具副本，保留非 Gemini 的原始参数语义。"""
+        """
+        按模型规整出站工具副本，保留非 Gemini 的原始参数语义。
+        """
         payload = original_get_request_payload(self, input_, stop=stop, **kwargs)
         tools = payload.get("tools") if isinstance(payload, dict) else None
         if not isinstance(tools, list):
@@ -718,7 +758,9 @@ def _patch_tool_schema_request_support(model_cls: Any, *, patch_marker: str) -> 
 
 
 class LLMHelper:
-    """LLM模型相关辅助功能"""
+    """
+    LLM模型相关辅助功能
+    """
 
     _DEFAULT_MAX_INPUT_TOKENS = 256_000
     _OPENAI_REASONING_EFFORT_ORDER = (
@@ -733,12 +775,16 @@ class LLMHelper:
 
     @staticmethod
     def _positive_token_limit(value: Any) -> int | None:
-        """只接受可直接作为模型窗口上限的正整数。"""
+        """
+        只接受可直接作为模型窗口上限的正整数。
+        """
         return value if type(value) is int and value > 0 else None
 
     @classmethod
     def _source_input_limit(cls, source: dict[str, Any]) -> int | None:
-        """合并同一事实源的 input/context 上限，采用更严格的约束。"""
+        """
+        合并同一事实源的 input/context 上限，采用更严格的约束。
+        """
         candidates = [
             cls._positive_token_limit(source.get("input_tokens")),
             cls._positive_token_limit(source.get("context_tokens")),
@@ -752,7 +798,9 @@ class LLMHelper:
             model_profile: Any,
             runtime: dict[str, Any],
     ) -> dict[str, Any]:
-        """合并窗口事实，未匹配端点仅在无有效配置时使用 256K 回退。"""
+        """
+        合并窗口事实，未匹配端点仅在无有效配置时使用 256K 回退。
+        """
         profile = dict(model_profile) if isinstance(model_profile, dict) else {}
         model_record = runtime.get("model_record") or {}
         model_metadata = runtime.get("model_metadata") or {}
@@ -1084,7 +1132,9 @@ class LLMHelper:
 
     @staticmethod
     def _metadata_supports_image_input(metadata: Any) -> Optional[bool]:
-        """从模型元数据中读取图片输入能力，未知时返回 None。"""
+        """
+        从模型元数据中读取图片输入能力，未知时返回 None。
+        """
         if not isinstance(metadata, dict):
             return None
 
@@ -1107,7 +1157,9 @@ class LLMHelper:
             base_url: Optional[str] = None,
             base_url_preset: Optional[str] = None,
     ) -> Optional[bool]:
-        """复用 provider 目录缓存解析当前模型是否支持图片输入。"""
+        """
+        复用 provider 目录缓存解析当前模型是否支持图片输入。
+        """
         provider_name = str(provider if provider is not None else get_runtime_setting('LLM_PROVIDER')).strip()
         model_name = str(model if model is not None else get_runtime_setting('LLM_MODEL')).strip()
         if not provider_name or not model_name:
@@ -1163,29 +1215,34 @@ class LLMHelper:
 
     @classmethod
     def supports_model_image_input(cls, model: Any) -> bool:
-        """按本次实际模型的 profile 和目录判断图像输入，每次请求重新读取用户总开关。"""
+        """
+        按实际模型优先读取缓存目录能力，未知时回退到依赖包 profile。
+
+        依赖包静态档案可能滞后于提供商能力；目录中的明确声明与用户附件
+        使用相同判定。每次请求重新读取总开关，不查询其他全局默认模型。
+        """
         if not get_runtime_setting('LLM_SUPPORT_IMAGE_INPUT'):
             return False
         profile = getattr(model, "profile", None)
         profile = profile if isinstance(profile, dict) else {}
-        supported = profile.get("image_inputs")
-        if isinstance(supported, bool):
-            return supported
         provider = getattr(model, "_moviepilot_llm_provider_id", None) or profile.get("moviepilot_provider_id")
         model_name = next((value for name in ("model_name", "model", "model_id")
                            if isinstance(value := getattr(model, name, None), str) and value), None)
-        if not provider or not model_name:
-            # 未知自定义模型沿用用户图片开关，不能套用另一个全局默认模型的能力。
-            return True
-        base_url = getattr(model, "_moviepilot_llm_base_url", None) or profile.get("moviepilot_base_url") or ""
-        supported = cls._resolve_catalog_image_input_support(
-            provider=str(provider), model=model_name, base_url=str(base_url), base_url_preset="",
-        )
-        return supported is not False
+        if provider and model_name:
+            base_url = getattr(model, "_moviepilot_llm_base_url", None) or profile.get("moviepilot_base_url") or ""
+            supported = cls._resolve_catalog_image_input_support(
+                provider=str(provider), model=model_name, base_url=str(base_url), base_url_preset="",
+            )
+            if supported is not None:
+                return supported
+        supported = profile.get("image_inputs")
+        return supported if isinstance(supported, bool) else True
 
     @staticmethod
     def is_unsupported_image_input_error(error: BaseException) -> bool:
-        """仅识别图片能力拒绝，不把认证、限流或普通请求故障降级为图片问题。"""
+        """
+        仅识别图片能力拒绝，不把认证、限流或普通请求故障降级为图片问题。
+        """
         status = getattr(error, "status_code", None)
         if isinstance(status, int) and status not in {400, 404, 422}:
             return False
@@ -1228,7 +1285,9 @@ class LLMHelper:
 
     @staticmethod
     def _matches_endpoint_host(base_url: str | None, expected_host: str) -> bool:
-        """严格匹配官方 API 主机，避免向兼容端点发送供应商专属参数。"""
+        """
+        严格匹配官方 API 主机，避免向兼容端点发送供应商专属参数。
+        """
         try:
             return (urlsplit(str(base_url or "")).hostname or "").lower() == expected_host
         except ValueError:
@@ -1245,7 +1304,9 @@ class LLMHelper:
             default_headers: dict[str, str] | None,
             model_kwargs: dict[str, Any],
     ) -> tuple[dict[str, str] | None, dict[str, Any]]:
-        """为官方端点构造稳定会话及提示词缓存路由参数。"""
+        """
+        为官方端点构造稳定会话及提示词缓存路由参数。
+        """
         cache_key = str(prompt_cache_key or "").strip()
         headers = dict(default_headers or {})
         kwargs = dict(model_kwargs)
@@ -1284,13 +1345,19 @@ class LLMHelper:
             model_cls: type,
             cache_control: dict[str, str],
     ) -> type:
-        """创建在最终模型绑定阶段保留缓存控制参数的适配类。"""
+        """
+        创建在最终模型绑定阶段保留缓存控制参数的适配类。
+        """
 
         class PromptCachingModel(model_cls):
-            """在 LangChain 工具绑定后仍保留提示词缓存参数的模型适配器。"""
+            """
+            在 LangChain 工具绑定后仍保留提示词缓存参数的模型适配器。
+            """
 
             def bind(self, **kwargs: Any) -> Any:
-                """绑定调用参数，并补入当前 Provider 的默认缓存控制。"""
+                """
+                绑定调用参数，并补入当前 Provider 的默认缓存控制。
+                """
                 kwargs.setdefault("cache_control", dict(cache_control))
                 return super().bind(**kwargs)
 
@@ -1305,7 +1372,9 @@ class LLMHelper:
             runtime: dict[str, Any],
             prompt_cache_key: str | None,
     ) -> bool:
-        """判断当前运行时是否为可安全启用缓存的 Anthropic 官方端点。"""
+        """
+        判断当前运行时是否为可安全启用缓存的 Anthropic 官方端点。
+        """
         return (
             bool(str(prompt_cache_key or "").strip())
             and str(provider or "").strip().lower() == "anthropic"
@@ -1387,7 +1456,9 @@ class LLMHelper:
         }
 
         def _set_metadata_attr(name: str, value: Any) -> None:
-            """兼容模型属性限制，写入仅供内部使用的运行时元数据。"""
+            """
+            兼容模型属性限制，写入仅供内部使用的运行时元数据。
+            """
             try:
                 setattr(model, name, value)
             except Exception:
@@ -1414,7 +1485,9 @@ class LLMHelper:
             model: Any,
             resolution: "ServerToolResolution",
     ) -> None:
-        """把服务端工具解析结果挂到模型实例，供 Agent 组装工具列表。"""
+        """
+        把服务端工具解析结果挂到模型实例，供 Agent 组装工具列表。
+        """
         metadata = {
             "mode": resolution.mode,
             "use_local_web_search": resolution.use_local_web_search,
@@ -1429,13 +1502,17 @@ class LLMHelper:
 
     @staticmethod
     def get_server_tools(model: Any) -> list[dict[str, Any]]:
-        """读取模型已解析的服务端工具定义。"""
+        """
+        读取模型已解析的服务端工具定义。
+        """
         metadata = getattr(model, "_moviepilot_server_tool_metadata", {}) or {}
         return [dict(tool) for tool in metadata.get("server_tools", [])]
 
     @staticmethod
     def should_use_local_web_search(model: Any) -> bool:
-        """判断当前模型是否应保留 MoviePilot 本地联网搜索工具。"""
+        """
+        判断当前模型是否应保留 MoviePilot 本地联网搜索工具。
+        """
         metadata = getattr(model, "_moviepilot_server_tool_metadata", {}) or {}
         return bool(metadata.get("use_local_web_search", True))
 
@@ -1449,7 +1526,9 @@ class LLMHelper:
         """
 
         def _normalize(value: str | None) -> str | None:
-            """统一旧思考级别别名并拒绝未支持的配置值。"""
+            """
+            统一旧思考级别别名并拒绝未支持的配置值。
+            """
             normalized = str(value or "").strip().lower()
             if not normalized:
                 return None
@@ -1761,7 +1840,8 @@ class LLMHelper:
 
     @staticmethod
     async def close_llm(model: Any) -> bool:
-        """释放 OpenAI/DeepSeek 模型独占的 HTTP 客户端，失败时保留 owner 供调用方重试。
+        """
+        释放 OpenAI/DeepSeek 模型独占的 HTTP 客户端，失败时保留 owner 供调用方重试。
 
         只关闭显式挂在模型上的 transport，不遍历 SDK 私有字段，避免误关其他
         提供商内部缓存并共享的客户端。异步连接必须在原事件循环中关闭。
@@ -1935,7 +2015,9 @@ class LLMHelper:
             models: List[dict[str, Any]],
             base_url: Optional[str] = None,
     ) -> List[dict[str, Any]]:
-        """为模型目录附加通用服务端工具能力元数据。"""
+        """
+        为模型目录附加通用服务端工具能力元数据。
+        """
         from app.agent.llm.discovery import attach_server_tool_capabilities
 
         return attach_server_tool_capabilities(provider, models, base_url)

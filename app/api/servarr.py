@@ -1,3 +1,7 @@
+"""
+提供 Radarr 与 Sonarr 兼容接口，将外部请求转换为订阅和媒体查询。
+"""
+
 from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -35,7 +39,9 @@ arr_router = APIRouter(tags=["servarr"], responses=ERROR_RESPONSES)
 
 
 def _subscribe_error_message(error: Optional[object]) -> str:
-    """将 Servarr 订阅失败转换为调用方能理解的提示。"""
+    """
+    将 Servarr 订阅失败转换为调用方能理解的提示。
+    """
     from app.runtime.errors import public_error_message
 
     return public_error_message(
@@ -45,7 +51,9 @@ def _subscribe_error_message(error: Optional[object]) -> str:
 
 
 def _subscribe_tmdb_id(subscribe: ServarrSubscription) -> int | None:
-    """将通用订阅身份投影为 Servarr 固定使用的 TMDB ID。"""
+    """
+    将通用订阅身份投影为 Servarr 固定使用的 TMDB ID。
+    """
     if (
         subscribe.media_source == MediaSource.TMDB.value
         and subscribe.media_id
@@ -60,7 +68,9 @@ def _resolve_series_media(
     title: Optional[str] = None,
     year: Optional[str | int] = None,
 ) -> Optional[MediaInfo]:
-    """按 TVDB ID 或标题解析剧集媒体信息，用于补全 Seerr 请求体中缺失的媒体身份。"""
+    """
+    按 TVDB ID 或标题解析剧集媒体信息，用于补全 Seerr 请求体中缺失的媒体身份。
+    """
     meta = None
     if tvdbid:
         tvdbinfo = MediaChain().tvdb_info(tvdbid=tvdbid)
@@ -446,10 +456,12 @@ async def arr_add_movie(
     )
     if subscribes:
         return _SchemaServarrIdResponse(id=subscribes[0].id)
+    if not movie.title or movie.year is None:
+        raise HTTPException(status_code=422, detail="电影标题和年份不能为空")
     # 添加订阅
     sid, message = await SubscribeChain().async_add(
         title=movie.title,
-        year=movie.year,
+        year=str(movie.year),
         mtype=MediaType.MOVIE,
         media_source=MediaSource.TMDB,
         media_id=str(movie.tmdbId),

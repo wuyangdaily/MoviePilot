@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 55
+version: 57
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -67,6 +67,13 @@ allowed-api-operations: >-
 
 # MoviePilot API
 
+For a historical invalid plugin instance ID reported in logs, `plugin.instance.purge`
+accepts the exact ID with only `config: true` (all other scope flags false). It deletes
+only an empty disabled host record: no saved configuration, display overrides, default
+target, or log overrides. A saved empty configuration object still protects the record.
+This recovery path never stops plugins or deletes plugin data, databases, or files.
+Records with settings, clones, missing records, and mixed scopes are rejected.
+
 Unhandled exceptions outside the durable transfer step ledger stop automatic
 replay and create an `unhandled_execution_review` diagnostic. Repair or disable
 the failing plugin and inspect the files before resolving it as `not_applied`;
@@ -105,6 +112,13 @@ as a workaround or bypass an ambiguous binding.
 For `subscription.update`, omit settings that should stay unchanged. Send JSON
 `null` to clear a supported optional setting; see [Subscription APIs](api/subscription.md)
 for the exact fields and the form empty-string compatibility rule.
+
+Music downloads keep an existing media category and otherwise use the Chinese
+music label as the downloader category, without changing library or metadata categories.
+qBittorrent still follows MoviePilot's configured automatic-management toggle:
+when enabled, its category rules control the save location; when disabled,
+MoviePilot omits the category and explicitly disables automatic management so
+the requested `save_path` applies. Existing tasks are not reclassified or moved.
 
 This file is intentionally kept as the routing and execution guide. Detailed
 operation contracts live in the linked category files under `api/`; load only
@@ -209,13 +223,23 @@ frontmatter allowlist, and the matching gateway contract together.
 
 ## API Surface Scope
 
+For installed plugins with a bound source, `plugin.market` only lists an update
+when that repository has a newer version. A higher version in another repository
+does not trigger `has_update`. Use `plugin.source.options` to inspect alternative
+sources; switching sources still requires an explicit source change. Installed
+plugins without a bound source retain market candidates for source selection.
+
 Operations declare an identity scope: `public` reads external public metadata without requiring a channel account binding; `bound_user` uses the active MoviePilot user bound to the stable channel sender ID (Web uses its authenticated user ID); `admin` requires administrator authority. Read-only does not mean public. Channel nicknames never establish identity. Personal records and subscription writes retain their existing ownership and permission checks.
 
 When identity resolution fails, relay the gateway's actual remediation message and sender ID. Channel users bind their own MoviePilot account via avatar > Personal Information > Account Binding, fill the named channel field, and save. Do not invent a Settings > Users binding page, substitute nicknames/group/bot IDs, diagnose an ambiguous binding failure as a network issue, or ask Web users to bind a notification channel. Public operations do not require binding.
 
 This Skill is the complete callable MoviePilot business API surface for the
 Agent. Every operation in `allowed-api-operations` has one exact parameter
-contract in a category file and one matching MCP `tools/list` branch. There is
+contract in a category file and one matching MCP `tools/list` branch in the
+default `full` schema mode. Clients explicitly sending
+`X-MCP-Schema-Mode: compact` receive a best-effort projection for oversized
+schemas; exact operation contracts remain available here and through
+`GET /api/v1/mcp/tools/moviepilot_api/schema`. There is
 no hidden fallback to an arbitrary REST route.
 
 MoviePilot's underlying OpenAPI document is larger because it also serves the
@@ -232,15 +256,19 @@ must be one of the following before the Agent may use its capability:
 - explicitly unapproved until a role, effect, confirmation, recovery, result,
   and English parameter contract is added.
 
-The maintained route-by-route inventory is
-`docs/refactor/agent-api-surface-audit.md`. Its generated drift test fails
-when OpenAPI changes without an explicit ownership decision.
+The maintained route-by-route inventory is the fixed registry in
+`app/agent/policy/api.py`. The drift test fails when OpenAPI changes without an
+explicit ownership decision.
 
 The management recovery route `POST /api/v1/history/transfer/{history_id}/discard-corrupt`
 is reserved for direct authenticated management clients and is not a callable
 Agent operation. It clears corrupt task state while retaining the history record.
 
 ## Calling Contract
+
+MCP operation and field descriptions are written in Chinese; operation IDs, field names,
+enum values, and request shapes retain their exact documented spelling. The compact schema
+rewrites descriptions that refer to omitted branches; use the full schema for precise inputs.
 
 Setting a subscription to state `S` stops queued and running automatic searches at safe
 boundaries, including new-subscription and site-retry tasks. An explicit subscription search

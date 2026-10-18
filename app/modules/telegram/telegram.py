@@ -1,3 +1,7 @@
+"""
+Telegram 消息投递、富文本回退、更新转发及输入状态生命周期。
+"""
+
 import asyncio
 import html as html_utils
 import re
@@ -38,6 +42,13 @@ from app.schemas.exception import ImmediateException
 TELEGRAM_PARSE_MODE_MARKDOWN = "MarkdownV2"
 TELEGRAM_PARSE_MODE_HTML = "HTML"
 TELEGRAM_PARSE_MODE_PLAIN = ""
+# Telegram 对同一消息的编辑频率有独立限制；流式缓冲会在闸门后合并为最新内容。
+TELEGRAM_EDIT_MIN_INTERVAL_SECONDS = 2.0
+# 服务端未给出重试时间时使用的默认冷却秒数
+TELEGRAM_RATE_LIMIT_DEFAULT_SECONDS = 60.0
+# 持续限流期间日志输出间隔，单位为秒
+TELEGRAM_RATE_LIMIT_LOG_INTERVAL_SECONDS = 60.0
+_TELEGRAM_RETRY_AFTER_PATTERN = re.compile(r"retry\s+after\s+(\d+)", re.IGNORECASE)
 # InputRichMessage 在 Bot API 中定义的字段，转换结果中的其他键不发送。
 _RICH_MESSAGE_FIELDS = ("html", "markdown", "is_rtl", "skip_entity_detection")
 TELEGRAM_PARSE_MODE_ALIASES = {
@@ -72,9 +83,10 @@ def _is_non_retryable_api_error(err: Exception) -> bool:
     """
     判断 Bot API 错误是否为重试无意义的 4xx。
 
-    5xx 与网络异常仍按原逻辑重试；429 由 Telegram 侧限流，同样不适合立即失败。
+    5xx 与网络异常仍按原逻辑重试；400 是确定性拒绝，429 需要由调用方建立冷却，
+    两者都不适合立即重复请求。
     """
-    return isinstance(err, TelegramApiError) and err.error_code == 400
+    return isinstance(err, TelegramApiError) and err.error_code in (400, 429)
 
 
 class Telegram:
@@ -83,13 +95,17 @@ class Telegram:
     """
 
     _bot: Optional[TelegramBotApi] = None
-    _callback_handlers: Dict[str, Callable] = {}  # 存储回调处理器
-    _bot_username: Optional[str] = None  # Bot username for mention detection
+    # 按回调命令保存自定义处理器
+    _callback_handlers: Dict[str, Callable] = {}
+    # 用于群聊提及识别的机器人用户名
+    _bot_username: Optional[str] = None
+    # 输入状态续发、首发延迟及各场景最长展示时间，单位均为秒
     _typing_interval_seconds = 5
     _typing_initial_delay_seconds = 1
     _typing_max_duration_seconds = 10 * 60
     _typing_command_max_duration_seconds = 30
     _typing_callback_max_duration_seconds = 60
+    # 单个输入状态任务与更新分发的关闭等待秒数
     _typing_join_timeout_seconds = 1
     _shutdown_timeout_seconds = 10
     # getUpdates 长轮询等待秒数；停止时不等待进行中的请求，因此不受关闭预算约束。
@@ -103,7 +119,12 @@ class Telegram:
             **kwargs,
     ):
         """
-        初始化参数
+        创建独立机器人客户端并启动长轮询接收线程。
+
+        :param TELEGRAM_TOKEN: 机器人令牌；令牌或默认会话缺失时不创建 API 客户端
+        :param TELEGRAM_CHAT_ID: 默认消息接收会话标识
+        :param TELEGRAM_TOPIC_ID: 默认会话的话题标识，必须为正十进制整数；无效时忽略
+        :param kwargs: 可选 API_URL 自建服务地址和 name 实例名称，其他配置当前不使用
         """
         # 即使配置不完整也保留基础属性，便于测试和未启用实例安全调用发送方法。
         self._telegram_token = TELEGRAM_TOKEN
@@ -118,6 +139,12 @@ class Telegram:
         self._polling_thread = None
         # 一个 Telegram 配置对应一个 SDK client，运行状态不能被其他配置共享。
         self._user_chat_mapping: Dict[str, str] = {}
+        # 出站编辑使用独立状态，避免高频流式回调把限流放大为重复请求。
+        self._edit_state_lock = threading.RLock()
+        self._edit_next_allowed: Dict[tuple[str, int], float] = {}
+        self._chat_rate_limit_until: Dict[str, float] = {}
+        self._chat_rate_limit_skipped: Dict[str, int] = {}
+        self._chat_rate_limit_last_log: Dict[str, float] = {}
         self._typing_tasks: Dict[str, threading.Thread] = {}
         self._typing_stop_flags: Dict[str, threading.Event] = {}
         self._typing_lock = threading.RLock()
@@ -126,7 +153,7 @@ class Telegram:
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
             logger.error("Telegram配置不完整！")
             return
-        # telegram bot api 地址，格式：https://api.telegram.org；自定义地址不走代理。
+        # Bot API 服务基址；自建地址不使用全局代理。
         self._bot = TelegramBotApi(
             TELEGRAM_TOKEN,
             api_url=kwargs.get("API_URL"),
@@ -161,8 +188,176 @@ class Telegram:
             raise RuntimeError("Telegram客户端未初始化")
         return self._bot
 
+    @staticmethod
+    def _find_api_error(err: BaseException) -> Optional[TelegramApiError]:
+        """
+        沿异常链查找 Bot API 原始错误，保留装饰器包装后的 429 语义。
+        """
+        current: Optional[BaseException] = err
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, TelegramApiError):
+                return current
+            current = current.__cause__ or current.__context__
+        return None
+
+    @classmethod
+    def _retry_after_seconds(cls, err: BaseException) -> Optional[int]:
+        """
+        读取 Telegram 429 的结构化或文本冷却秒数。
+        """
+        api_error = cls._find_api_error(err)
+        if api_error is None or api_error.error_code != 429:
+            return None
+        retry_after = api_error.parameters.get("retry_after")
+        try:
+            if retry_after is not None and float(retry_after) > 0:
+                return max(1, int(float(retry_after)))
+        except (TypeError, ValueError):
+            pass
+        matched = _TELEGRAM_RETRY_AFTER_PATTERN.search(api_error.description)
+        if matched:
+            return max(1, int(matched.group(1)))
+        return None
+
+    @classmethod
+    def _is_rate_limit_error(cls, err: BaseException) -> bool:
+        """
+        判断异常链是否包含 Telegram 429。
+        """
+        return cls._retry_after_seconds(err) is not None or (
+            (api_error := cls._find_api_error(err)) is not None
+            and api_error.error_code == 429
+        )
+
+    def _ensure_edit_state(self) -> None:
+        """
+        为旧测试桩和未完整初始化实例补齐出站编辑状态。
+        """
+        if hasattr(self, "_edit_state_lock"):
+            return
+        self._edit_state_lock = threading.RLock()
+        self._edit_next_allowed = {}
+        self._chat_rate_limit_until = {}
+        self._chat_rate_limit_skipped = {}
+        self._chat_rate_limit_last_log = {}
+
+    def _mark_rate_limit(
+            self,
+            chat_id: Union[str, int],
+            err: BaseException,
+            operation: str = "编辑",
+    ) -> None:
+        """
+        为聊天记录 Telegram 429 冷却，并输出一次可诊断的限流日志。
+        """
+        self._ensure_edit_state()
+        retry_after = self._retry_after_seconds(err) or int(TELEGRAM_RATE_LIMIT_DEFAULT_SECONDS)
+        now = time.monotonic()
+        chat_key = str(chat_id)
+        with self._edit_state_lock:
+            previous_until = self._chat_rate_limit_until.get(chat_key, 0.0)
+            cooldown_until = max(
+                previous_until,
+                now + max(retry_after, 1),
+            )
+            self._chat_rate_limit_until[chat_key] = cooldown_until
+            if previous_until <= now:
+                self._chat_rate_limit_skipped[chat_key] = 0
+                self._chat_rate_limit_last_log[chat_key] = now
+        if cooldown_until > previous_until:
+            logger.warning(
+                "Telegram%s触发429，chat_id=%s，冷却%s秒%s",
+                operation,
+                chat_id,
+                retry_after,
+                "（按 retry_after）" if self._retry_after_seconds(err) else "（未提供 retry_after，使用默认值）",
+            )
+
+    def _is_chat_rate_limited(self, chat_id: Union[str, int], operation: str = "编辑") -> bool:
+        """
+        检查聊天是否仍在 Telegram 429 冷却期，并限频记录跳过次数。
+        """
+        self._ensure_edit_state()
+        now = time.monotonic()
+        chat_key = str(chat_id)
+        with self._edit_state_lock:
+            cooldown_until = self._chat_rate_limit_until.get(chat_key, 0.0)
+            if cooldown_until <= now:
+                if chat_key in self._chat_rate_limit_until:
+                    skipped = self._chat_rate_limit_skipped.pop(chat_key, 0)
+                    self._chat_rate_limit_until.pop(chat_key, None)
+                    self._chat_rate_limit_last_log.pop(chat_key, None)
+                    if skipped:
+                        logger.info(
+                            "Telegram%s限流冷却结束，chat_id=%s，期间跳过%s次请求",
+                            operation,
+                            chat_id,
+                            skipped,
+                        )
+                return False
+            skipped = self._chat_rate_limit_skipped.get(chat_key, 0) + 1
+            self._chat_rate_limit_skipped[chat_key] = skipped
+            last_log = self._chat_rate_limit_last_log.get(chat_key, 0.0)
+            if skipped == 1 or now - last_log >= TELEGRAM_RATE_LIMIT_LOG_INTERVAL_SECONDS:
+                self._chat_rate_limit_last_log[chat_key] = now
+                remaining = max(0, int(cooldown_until - now))
+                logger.warning(
+                    "Telegram%s处于429冷却，跳过后续请求：chat_id=%s，剩余约%s秒，累计跳过%s次",
+                    operation,
+                    chat_id,
+                    remaining,
+                    skipped,
+                )
+            return True
+
+    def _reserve_edit(self, chat_id: Union[str, int], message_id: Union[str, int]) -> bool:
+        """
+        原子预留一次消息编辑，执行聊天冷却和消息级最小间隔检查。
+        """
+        self._ensure_edit_state()
+        if self._is_chat_rate_limited(chat_id):
+            return False
+        now = time.monotonic()
+        key = (str(chat_id), int(message_id))
+        with self._edit_state_lock:
+            if self._edit_next_allowed.get(key, 0.0) > now:
+                return False
+            self._edit_next_allowed[key] = now + TELEGRAM_EDIT_MIN_INTERVAL_SECONDS
+        return True
+
+    def _mark_edit_succeeded(
+            self, chat_id: Union[str, int], message_id: Union[str, int]
+    ) -> None:
+        """
+        以实际完成时间重新计算消息编辑间隔，避免并发请求贴着结束时间发送。
+        """
+        self._ensure_edit_state()
+        key = (str(chat_id), int(message_id))
+        with self._edit_state_lock:
+            self._edit_next_allowed[key] = (
+                time.monotonic() + TELEGRAM_EDIT_MIN_INTERVAL_SECONDS
+            )
+
+    def _remember_sent_message(self, sent: Any, chat_id: Union[str, int]) -> None:
+        """
+        记录新消息的发送时间，使首个流式编辑也遵守最小间隔。
+        """
+        self._ensure_edit_state()
+        if not isinstance(sent, dict) or not sent.get("message_id"):
+            return
+        target_chat_id = sent.get("chat", {}).get("id", chat_id)
+        key = (str(target_chat_id), int(sent["message_id"]))
+        with self._edit_state_lock:
+            self._edit_next_allowed[key] = (
+                time.monotonic() + TELEGRAM_EDIT_MIN_INTERVAL_SECONDS
+            )
+
     def _run_polling(self) -> None:
-        """轮询线程入口，逐条处理 getUpdates 返回的更新。"""
+        """
+        轮询线程入口，逐条处理 getUpdates 返回的更新。
+        """
         try:
             self._api.polling(
                 self._handle_update,
@@ -172,7 +367,9 @@ class Telegram:
             logger.error(f"Telegram消息接收服务异常：{str(err)}")
 
     def _handle_update(self, update: JsonDict) -> None:
-        """按更新类型分发：普通消息转发主程序，按钮回调先应答再转发。"""
+        """
+        按更新类型分发：普通消息转发主程序，按钮回调先应答再转发。
+        """
         if "callback_query" in update:
             self._handle_callback_query(update["callback_query"])
             return
@@ -208,20 +405,18 @@ class Telegram:
 
     def _handle_callback_query(self, call: JsonDict) -> None:
         """
-        处理按钮点击回调
+        处理按钮点击回调。
         """
         try:
-            # Update user-chat mapping for callbacks too
+            # 按钮回调也更新用户到最近会话的映射
             chat_id = call["message"]["chat"]["id"]
             self._update_user_chat_mapping(call["from"]["id"], chat_id)
 
-            # 解析回调数据
             callback_data = call.get("data")
             user_id = str(call["from"]["id"])
 
             logger.info(f"收到按钮回调：{callback_data}，用户：{user_id}")
 
-            # 发送回调数据给主程序处理
             callback_json = {
                 "callback_query": {
                     "id": call["id"],
@@ -239,7 +434,6 @@ class Telegram:
             # 先确认回调，避免用户看到loading状态
             self._api.answer_callback_query(call["id"])
 
-            # 发送给主程序处理
             if not self._forward_to_message_chain(callback_json):
                 logger.warn("Telegram按钮回调转发失败")
 
@@ -248,13 +442,16 @@ class Telegram:
             self._api.answer_callback_query(call["id"], "处理失败，请重试")
 
     def _forward_to_message_chain(self, payload: dict) -> bool:
-        """把 Telegram SDK 回调同步转交统一消息入口。"""
+        """
+        把 Telegram SDK 回调同步转交统一消息入口。
+        """
         return forward_message_to_host(payload, self._config_name)
 
     @property
     def bot(self):
         """
-        获取Telegram Bot实例
+        获取Telegram Bot实例。
+
         :return: Bot API 客户端或None
         """
         return self._bot
@@ -262,16 +459,18 @@ class Telegram:
     @property
     def bot_username(self) -> Optional[str]:
         """
-        获取Bot用户名
+        获取Bot用户名。
+
         :return: Bot用户名或None
         """
         return self._bot_username
 
     def download_file(self, file_id: str) -> Optional[bytes]:
         """
-        下载Telegram文件
-        :param file_id: 文件ID
-        :return: 文件字节数据
+        查询文件路径并下载 Telegram 媒体内容。
+
+        :param file_id: Telegram 分配的文件标识
+        :return: 下载内容字节；未初始化、参数缺失或下载失败返回 None
         """
         if not self._bot:
             return None
@@ -304,14 +503,18 @@ class Telegram:
 
     @staticmethod
     def _telegramify_item_text(item: Text) -> str:
-        """将 telegramify 文本片段转换为 Telegram MarkdownV2 字符串。"""
+        """
+        将 telegramify 文本片段转换为 Telegram MarkdownV2 字符串。
+        """
         if entities_to_markdownv2:
             return entities_to_markdownv2(item.text, item.entities)
         return standardize(item.text)
 
     @staticmethod
     def _telegramify_item_caption(item: Text | File | Photo) -> str:
-        """将 telegramify 文本或媒体片段转换为 Telegram MarkdownV2 caption。"""
+        """
+        将 telegramify 文本或媒体片段转换为 Telegram MarkdownV2 caption。
+        """
         if isinstance(item, Text):
             return Telegram._telegramify_item_text(item)
         if entities_to_markdownv2:
@@ -320,7 +523,9 @@ class Telegram:
 
     @staticmethod
     def _normalize_parse_mode(parse_mode: Optional[str] = None) -> str:
-        """规范化 Telegram 消息格式类型。"""
+        """
+        规范化 Telegram 消息格式类型。
+        """
         if parse_mode is None:
             return TELEGRAM_PARSE_MODE_MARKDOWN
         normalized = str(parse_mode).strip()
@@ -332,17 +537,23 @@ class Telegram:
 
     @staticmethod
     def _is_html_parse_mode(parse_mode: Optional[str] = None) -> bool:
-        """判断本次发送是否使用 Telegram HTML 格式。"""
+        """
+        判断本次发送是否使用 Telegram HTML 格式。
+        """
         return Telegram._normalize_parse_mode(parse_mode) == TELEGRAM_PARSE_MODE_HTML
 
     @staticmethod
     def _is_plain_parse_mode(parse_mode: Optional[str] = None) -> bool:
-        """判断本次发送是否禁用 Telegram 文本格式解析。"""
+        """
+        判断本次发送是否禁用 Telegram 文本格式解析。
+        """
         return Telegram._normalize_parse_mode(parse_mode) == TELEGRAM_PARSE_MODE_PLAIN
 
     @staticmethod
     def _format_title(title: Optional[str], parse_mode: Optional[str] = None) -> Optional[str]:
-        """按 parse_mode 生成 Telegram 标题文本。"""
+        """
+        按 parse_mode 生成 Telegram 标题文本。
+        """
         if not title:
             return None
         if Telegram._is_plain_parse_mode(parse_mode):
@@ -353,7 +564,9 @@ class Telegram:
 
     @staticmethod
     def _format_link(label: str, link: str, parse_mode: Optional[str] = None) -> str:
-        """按 parse_mode 生成 Telegram 链接文本。"""
+        """
+        按 parse_mode 生成 Telegram 链接文本。
+        """
         if Telegram._is_plain_parse_mode(parse_mode):
             return f"{label}: {link}"
         if Telegram._is_html_parse_mode(parse_mode):
@@ -365,7 +578,9 @@ class Telegram:
 
     @staticmethod
     def _format_italic(text: str, parse_mode: Optional[str] = None) -> str:
-        """按 parse_mode 生成 Telegram 斜体文本。"""
+        """
+        按 parse_mode 生成 Telegram 斜体文本。
+        """
         if Telegram._is_plain_parse_mode(parse_mode):
             return text
         if Telegram._is_html_parse_mode(parse_mode):
@@ -374,12 +589,16 @@ class Telegram:
 
     @staticmethod
     def _format_detail_link(link: str, parse_mode: Optional[str] = None) -> str:
-        """按 parse_mode 生成查看详情链接。"""
+        """
+        按 parse_mode 生成查看详情链接。
+        """
         return Telegram._format_link("查看详情", link, parse_mode)
 
     @staticmethod
     def _prepare_text(text: Optional[str], parse_mode: Optional[str] = None) -> Optional[str]:
-        """按 parse_mode 生成 Telegram 可发送文本。"""
+        """
+        按 parse_mode 生成 Telegram 可发送文本。
+        """
         if not text:
             return None
         if (
@@ -391,7 +610,9 @@ class Telegram:
 
     @staticmethod
     def _split_plain_text(text: str, limit: int) -> List[str]:
-        """按 Telegram 长度限制拆分普通文本。"""
+        """
+        按 Telegram 长度限制拆分普通文本。
+        """
         if not text:
             return []
         if limit <= 0:
@@ -413,7 +634,8 @@ class Telegram:
             self, userid: Optional[Union[str, int]], chat_id: Optional[Union[str, int]]
     ) -> None:
         """
-        更新用户与聊天的映射关系
+        更新用户与聊天的映射关系。
+
         :param userid: 用户ID
         :param chat_id: 聊天ID
         """
@@ -422,7 +644,8 @@ class Telegram:
 
     def _get_user_chat_id(self, userid: str) -> Optional[str]:
         """
-        获取用户对应的聊天ID
+        获取用户对应的聊天ID。
+
         :param userid: 用户ID
         :return: 聊天ID或None
         """
@@ -430,7 +653,8 @@ class Telegram:
 
     def _should_process_message(self, message: JsonDict) -> bool:
         """
-        判断是否应该处理这条消息
+        判断是否应该处理这条消息。
+
         :param message: Bot API Message 结构
         :return: 是否处理
         """
@@ -451,7 +675,7 @@ class Telegram:
         # 群聊中检查是否@了机器人
         if chat_type in ["group", "supergroup"]:
             if not self._bot_username:
-                # 如果没有获取到bot用户名，为了安全起见处理所有消息
+                # 未获取机器人用户名时无法匹配提及，沿用兼容行为接收该群全部消息
                 logger.debug("未获取到bot用户名，处理所有群聊消息")
                 return True
 
@@ -491,7 +715,9 @@ class Telegram:
 
     def get_state(self) -> bool:
         """
-        获取状态
+        检查当前实例是否持有 Bot API 客户端。
+
+        :return: 客户端存在时返回 True；不额外检查网络或轮询健康状态
         """
         return self._bot is not None
 
@@ -502,9 +728,12 @@ class Telegram:
             initial_delay_seconds: Optional[float] = None,
     ) -> bool:
         """
-        启动持续发送正在输入状态的任务。
+        启动一个会话独占的输入状态续发任务。
 
-        :return: 是否取得该会话的唯一 typing owner
+        :param chat_id: 需要展示输入状态的会话标识
+        :param max_duration_seconds: 最长续发秒数；未提供或为 0 时使用 600 秒
+        :param initial_delay_seconds: 首发延迟秒数；None 使用 1 秒，负数按 0 处理
+        :return: 成功启动返回 True；客户端停止接收任务或旧任务未退出时返回 False
         """
         chat_id_str = str(chat_id)
         with self._typing_lifecycle_lock:
@@ -528,8 +757,10 @@ class Telegram:
                 else max(initial_delay_seconds, 0)
             )
 
-            def typing_worker():
-                """延迟首发并定期发送 typing 状态的后台线程。"""
+            def typing_worker() -> None:
+                """
+                延迟首发并定期发送 typing 状态的后台线程。
+                """
                 started_at = time.monotonic()
                 try:
                     # Telegram 没有撤销 typing 的接口，短响应先等待一小段时间，
@@ -575,9 +806,10 @@ class Telegram:
 
     def _stop_typing_task(self, chat_id: Union[str, int]) -> bool:
         """
-        停止正在输入状态的任务，并保留尚未结束的 owner。
+        请求结束指定会话的输入状态任务，并最多等待 1 秒。
 
-        :return: 任务是否已经进入终态
+        :param chat_id: 目标会话标识
+        :return: 任务已退出或不存在时返回 True；仍运行时返回 False 并保留任务引用
         """
         chat_id_str = str(chat_id)
         with self._typing_lifecycle_lock:
@@ -612,7 +844,11 @@ class Telegram:
             userid: Optional[Union[str, int]] = None,
     ) -> bool:
         """
-        外部链路主动启动 typing 状态。
+        根据会话或用户启动输入状态续发。
+
+        :param chat_id: 显式会话标识，优先于用户映射
+        :param userid: 无显式会话时先查最近会话，再使用用户标识作为私聊目标
+        :return: 任务启动成功返回 True；无目标或启动被拒绝返回 False
         """
         if chat_id:
             target_chat_id = chat_id
@@ -631,7 +867,11 @@ class Telegram:
             userid: Optional[Union[str, int]] = None,
     ) -> bool:
         """
-        外部链路主动停止 typing 状态。
+        根据会话或用户请求停止输入状态续发。
+
+        :param chat_id: 显式会话标识，优先于用户映射
+        :param userid: 无显式会话时先查最近会话，再使用用户标识作为私聊目标
+        :return: 找到目标并请求停止返回 True；无目标返回 False，True 不保证任务已经退出
         """
         if chat_id:
             target_chat_id = chat_id
@@ -647,7 +887,7 @@ class Telegram:
 
     def send_msg(
             self,
-            title: str,
+            title: Optional[str],
             text: Optional[str] = None,
             image: Optional[str] = None,
             userid: Optional[str] = None,
@@ -663,33 +903,37 @@ class Telegram:
             private_delivery: bool = False,
     ) -> Optional[JsonDict]:
         """
-        发送Telegram消息
-        :param title: 消息标题
-        :param text: 消息内容
-        :param image: 消息图片地址
-        :param userid: 用户ID，如有则只发消息给该用户
-        :param link: 跳转链接
-        :param buttons: 按钮列表，格式：[[{"text": "按钮文本", "callback_data": "回调数据"}]]
-        :param force_reply: 是否请求 Telegram 客户端强制回复
-        :param original_message_id: 原消息ID，如果提供则编辑原消息
-        :param original_chat_id: 原消息的聊天ID，编辑消息时需要
-        :param disable_web_page_preview: 是否禁用链接预览
-        :param stop_typing: 发送完成后是否立即停止 typing
-        :param parse_mode: Telegram 消息格式类型，默认 MarkdownV2，可传 HTML
-        :param rich_message: 完整的 Telegram Rich Markdown 正文，设置后替代普通图文内容
-        :param private_delivery: 是否绕过最近会话映射，直接以用户 ID 作为私聊目标
-        :return: 包含 message_id, chat_id, success 的字典
+        发送文本、图文或富文本，并兼容原消息编辑和强制回复。
+
+        :param title: 可选消息标题，与正文和富文本不能同时为空
+        :param text: 普通消息正文
+        :param image: 图文封面地址，富文本模式下不使用
+        :param userid: 接收用户标识；默认使用该用户最近会话，无记录时用用户标识，未指定时用默认会话
+        :param link: 普通正文末尾的详情地址
+        :param buttons: 按行排列的链接或回调按钮；优先于强制回复键盘
+        :param force_reply: 是否显示强制回复键盘；与原消息上下文结合时发送新回复
+        :param original_message_id: 与原会话同时提供时编辑原消息；无按钮的强制回复模式改为回复原消息
+        :param original_chat_id: 显式原会话标识，优先于普通用户映射
+        :param disable_web_page_preview: 是否禁用普通文本链接预览
+        :param stop_typing: 是否在操作收尾时请求停止输入状态，默认 False
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :param rich_message: 完整富文本正文；非空时替代普通图文内容
+        :param private_delivery: 有用户标识时是否绕过最近会话映射直接投递私聊
+        :return: 含 success 和消息引用的结果；配置缺失返回 None，限流、空内容或发送失败返回 success 为 False 的字典
         """
         if not self._telegram_token or not self._telegram_chat_id:
             return None
 
         parse_mode = self._normalize_parse_mode(parse_mode)
-        # Determine target chat_id with improved logic using user mapping
+        # 兼容原会话回复、最近互动会话及显式私聊投递
         chat_id = self._determine_target_chat_id(
             userid,
             original_chat_id,
             private_delivery=private_delivery,
         )
+        if self._is_chat_rate_limited(chat_id, operation="发送"):
+            self._stop_typing_if_needed(chat_id, stop_typing)
+            return {"success": False}
         if not title and not text and not rich_message:
             logger.warn("标题、内容和富文本内容不能同时为空")
             self._stop_typing_if_needed(chat_id, stop_typing)
@@ -709,7 +953,6 @@ class Telegram:
             if link:
                 caption = f"{caption}\n{self._format_detail_link(link, parse_mode)}"
 
-            # 创建按钮键盘
             reply_markup = None
             if buttons:
                 reply_markup = self._create_inline_keyboard(buttons)
@@ -717,48 +960,18 @@ class Telegram:
                 reply_markup = self._create_force_reply_markup()
 
             if rich_message:
-                if original_message_id and original_chat_id and not force_reply:
-                    result = self.__edit_rich_message(
-                        chat_id=original_chat_id,
-                        message_id=original_message_id,
-                        rich_message=rich_message,
-                        reply_markup=reply_markup,
-                    )
-                    self._stop_typing_if_needed(chat_id, stop_typing)
-                    return {
-                        "success": bool(result),
-                        "message_id": original_message_id,
-                        "chat_id": original_chat_id,
-                    }
-
-                target_chat_id = (
-                    original_chat_id
-                    if force_reply and original_chat_id
-                    else chat_id
+                return self._send_rich_message(
+                    chat_id=chat_id,
+                    text=text,
+                    buttons=buttons,
+                    force_reply=force_reply,
+                    original_message_id=original_message_id,
+                    original_chat_id=original_chat_id,
+                    stop_typing=stop_typing,
+                    rich_message=rich_message,
+                    reply_markup=reply_markup,
                 )
-                try:
-                    sent = self.__send_rich_message(
-                        chat_id=target_chat_id,
-                        rich_message=rich_message,
-                        reply_markup=reply_markup,
-                        reply_to_message_id=(
-                            original_message_id if force_reply else None
-                        ),
-                    )
-                except Exception as rich_err:
-                    # Rich Message 失败不再等同于通知丢失，降级为纯文本重发一次。
-                    logger.warning(
-                        f"Telegram Rich Message 发送失败，降级为纯文本：{rich_err}"
-                    )
-                    sent = self.__send_plain_fallback(
-                        chat_id=target_chat_id,
-                        rich_message=rich_message,
-                        reply_markup=reply_markup,
-                    )
-                self._stop_typing_if_needed(chat_id, stop_typing)
-                return self._sent_result(sent, chat_id)
 
-            # 判断是编辑消息还是发送新消息
             if original_message_id and original_chat_id:
                 if force_reply and reply_markup and not buttons:
                     sent = self.__send_request(
@@ -770,9 +983,9 @@ class Telegram:
                         parse_mode=parse_mode,
                         reply_to_message_id=original_message_id,
                     )
+                    self._remember_sent_message(sent, original_chat_id)
                     self._stop_typing_if_needed(chat_id, stop_typing)
                     return self._sent_result(sent, chat_id)
-                # 编辑消息
                 result = self.__edit_message(
                     original_chat_id,
                     original_message_id,
@@ -789,7 +1002,6 @@ class Telegram:
                     "chat_id": original_chat_id,
                 }
             else:
-                # 发送新消息
                 sent = self.__send_request(
                     userid=chat_id,
                     image=image,
@@ -798,6 +1010,7 @@ class Telegram:
                     disable_web_page_preview=disable_web_page_preview,
                     parse_mode=parse_mode,
                 )
+                self._remember_sent_message(sent, chat_id)
                 self._stop_typing_if_needed(chat_id, stop_typing)
                 return self._sent_result(sent, chat_id)
 
@@ -806,9 +1019,68 @@ class Telegram:
             self._stop_typing_if_needed(chat_id, stop_typing)
             return {"success": False}
 
+    def _send_rich_message(
+            self,
+            *,
+            chat_id: Union[str, int],
+            text: Optional[str],
+            buttons: Optional[List[List[Dict[str, Any]]]],
+            force_reply: bool,
+            original_message_id: Optional[int],
+            original_chat_id: Optional[str],
+            stop_typing: bool,
+            rich_message: str,
+            reply_markup: Optional[JsonDict],
+    ) -> JsonDict:
+        """
+        发送或编辑 Rich Message，并在限流时隔离后续输出请求。
+        """
+        if original_message_id and original_chat_id and not force_reply:
+            result = self.edit_msg(
+                chat_id=original_chat_id,
+                message_id=original_message_id,
+                text=text or "",
+                rich_message=rich_message,
+                buttons=buttons,
+                stop_typing=stop_typing,
+            )
+            return {
+                "success": bool(result),
+                "message_id": original_message_id,
+                "chat_id": original_chat_id,
+            }
+
+        target_chat_id = original_chat_id if force_reply and original_chat_id else chat_id
+        try:
+            sent = self.__send_rich_message(
+                chat_id=target_chat_id,
+                rich_message=rich_message,
+                reply_markup=reply_markup,
+                reply_to_message_id=original_message_id if force_reply else None,
+            )
+        except Exception as rich_err:
+            if self._is_rate_limit_error(rich_err):
+                self._mark_rate_limit(target_chat_id, rich_err, operation="发送")
+                sent = None
+            else:
+                # Rich Message 发送失败不再等同于通知丢失，降级为纯文本重发一次。
+                logger.warning(
+                    f"Telegram Rich Message 发送失败，降级为纯文本：{rich_err}"
+                )
+                sent = self.__send_plain_fallback(
+                    chat_id=target_chat_id,
+                    rich_message=rich_message,
+                    reply_markup=reply_markup,
+                )
+        self._remember_sent_message(sent, target_chat_id)
+        self._stop_typing_if_needed(chat_id, stop_typing)
+        return self._sent_result(sent, chat_id)
+
     @staticmethod
     def _sent_result(sent: Any, chat_id: Union[str, int]) -> JsonDict:
-        """把 Bot API 返回的 Message 转为发送结果；非 Message 的真值只表示成功。"""
+        """
+        把 Bot API 返回的 Message 转为发送结果；非 Message 的真值只表示成功。
+        """
         if isinstance(sent, dict) and "message_id" in sent:
             return {
                 "success": True,
@@ -819,7 +1091,9 @@ class Telegram:
 
     @staticmethod
     def _create_force_reply_markup() -> JsonDict:
-        """生成只对被回复用户生效的 ForceReply 标记。"""
+        """
+        生成只对被回复用户生效的 ForceReply 标记。
+        """
         return {
             "force_reply": True,
             "selective": True,
@@ -836,7 +1110,15 @@ class Telegram:
             parse_mode: Optional[str] = None,
     ) -> Optional[JsonDict]:
         """
-        发送Telegram语音消息。
+        发送本地语音，进入发送流程后清理源文件。
+
+        :param voice_path: 语音文件路径；发送成功或失败都会尝试删除
+        :param userid: 接收用户标识；默认使用该用户最近会话，无记录时用用户标识，未指定时用默认会话
+        :param caption: 可选语音说明
+        :param original_chat_id: 显式原会话标识，优先于普通用户映射
+        :param stop_typing: 是否在操作收尾时请求停止输入状态，默认 False
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :return: 含 success、message_id 和 chat_id 的结果；失败为 success 为 False 的字典，未配置或无输入路径返回 None
         """
         if not self._bot or not voice_path:
             return None
@@ -882,7 +1164,17 @@ class Telegram:
             parse_mode: Optional[str] = None,
     ) -> Optional[JsonDict]:
         """
-        发送本地图片或文件给 Telegram 用户。
+        根据后缀发送本地图片或普通附件，保留源文件。
+
+        :param file_path: 本地普通文件路径
+        :param userid: 接收用户标识；默认使用该用户最近会话，无记录时用用户标识，未指定时用默认会话
+        :param title: 可选附件说明标题
+        :param text: 可选附件说明正文
+        :param file_name: 普通附件的显示名称；为空时使用源文件名，图片不使用此值
+        :param original_chat_id: 显式原会话标识，优先于普通用户映射
+        :param stop_typing: 是否在操作收尾时请求停止输入状态，默认 False
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :return: 含 success、message_id 和 chat_id 的结果；失败为 success 为 False 的字典，未配置或无输入路径返回 None
         """
         if not self._bot or not file_path:
             return None
@@ -939,20 +1231,20 @@ class Telegram:
             private_delivery: bool = False,
     ) -> str:
         """
-        确定目标聊天ID，使用用户映射确保回复到正确的聊天
-        :param userid: 用户ID
-        :param original_chat_id: 原消息的聊天ID
-        :return: 目标聊天ID
+        按私聊约束、原会话、用户映射和默认配置解析发送目标。
+
+        :param userid: 接收用户标识；默认使用该用户最近会话，无记录时用用户标识，未指定时用默认会话
+        :param original_chat_id: 显式原会话标识，优先于普通用户映射
+        :param private_delivery: 有用户标识时是否强制直接以该用户作为私聊目标
+        :return: 目标会话标识；无用户和原会话时使用配置中的默认值
         """
         # 私聊投递以渠道用户 ID 为目标，最近会话映射可能指向群聊，不能参与解析。
         if private_delivery and userid:
             return str(userid)
 
-        # 1. 优先使用原消息的聊天ID (编辑消息场景)
         if original_chat_id:
             return original_chat_id
 
-        # 2. 如果有userid，尝试从映射中获取用户的聊天ID
         if userid:
             mapped_chat_id = self._get_user_chat_id(userid)
             if mapped_chat_id:
@@ -960,11 +1252,12 @@ class Telegram:
             # 如果映射中没有，回退到使用userid作为聊天ID (私聊场景)
             return userid
 
-        # 3. 最后使用默认聊天ID
         return self._telegram_chat_id
 
     def _topic_kwargs(self, chat_id: Optional[Union[str, int]]) -> dict[str, int]:
-        """仅向本渠道配置的群组投递话题参数，避免影响私聊和其它会话。"""
+        """
+        仅向本渠道配置的群组投递话题参数，避免影响私聊和其它会话。
+        """
         topic_id = getattr(self, "_telegram_topic_id", None)
         if topic_id and chat_id is not None and str(chat_id) == str(self._telegram_chat_id):
             return {"message_thread_id": topic_id}
@@ -983,21 +1276,23 @@ class Telegram:
             parse_mode: Optional[str] = None,
     ) -> Optional[bool]:
         """
-        发送媒体列表消息
-        :param medias: 媒体信息列表
-        :param userid: 用户ID，如有则只发消息给该用户
-        :param title: 消息标题
-        :param link: 跳转链接
-        :param buttons: 按钮列表，格式：[[{"text": "按钮文本", "callback_data": "回调数据"}]]
-        :param original_message_id: 原消息ID，如果提供则编辑原消息
-        :param original_chat_id: 原消息的聊天ID，编辑消息时需要
-        :param stop_typing: 发送完成后是否立即停止 typing
-        :param parse_mode: Telegram 消息格式类型，默认 MarkdownV2，可传 HTML
+        发送或编辑媒体候选列表。
+
+        :param medias: 按原顺序展示的候选项
+        :param userid: 接收用户标识；默认使用该用户最近会话，无记录时用用户标识，未指定时用默认会话
+        :param title: 列表标题
+        :param link: 列表末尾链接
+        :param buttons: 按行排列的链接或回调按钮
+        :param original_message_id: 与原会话同时提供时编辑该消息
+        :param original_chat_id: 显式原会话标识，优先于普通用户映射
+        :param stop_typing: 是否在操作收尾时请求停止输入状态，默认 False
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :return: 编辑时返回成功布尔值，发送时返回最后一条 Bot API 消息字典；异常返回 False，配置缺失或发送无结果返回 None
         """
         if not self._telegram_token or not self._telegram_chat_id:
             return None
 
-        # 列表消息也可能是一次交互的最终响应，默认在发送后结束 typing。
+        # 列表发送结束后是否停止输入状态，由 stop_typing 明确控制。
         chat_id = self._determine_target_chat_id(userid, original_chat_id)
         parse_mode = self._normalize_parse_mode(parse_mode)
         try:
@@ -1026,14 +1321,11 @@ class Telegram:
             if link:
                 caption = f"{caption}\n{self._format_detail_link(link, parse_mode)}"
 
-            # 创建按钮键盘
             reply_markup = None
             if buttons:
                 reply_markup = self._create_inline_keyboard(buttons)
 
-            # 判断是编辑消息还是发送新消息
             if original_message_id and original_chat_id:
-                # 编辑消息
                 return self.__edit_message(
                     original_chat_id,
                     original_message_id,
@@ -1043,7 +1335,6 @@ class Telegram:
                     parse_mode=parse_mode,
                 )
             else:
-                # 发送新消息
                 return self.__send_request(
                     userid=chat_id,
                     image=image,
@@ -1071,21 +1362,23 @@ class Telegram:
             parse_mode: Optional[str] = None,
     ) -> Optional[bool]:
         """
-        发送种子列表消息
-        :param torrents: 种子信息列表
-        :param userid: 用户ID，如有则只发消息给该用户
-        :param title: 消息标题
-        :param link: 跳转链接
-        :param buttons: 按钮列表，格式：[[{"text": "按钮文本", "callback_data": "回调数据"}]]
-        :param original_message_id: 原消息ID，如果提供则编辑原消息
-        :param original_chat_id: 原消息的聊天ID，编辑消息时需要
-        :param stop_typing: 发送完成后是否立即停止 typing
-        :param parse_mode: Telegram 消息格式类型，默认 MarkdownV2，可传 HTML
+        发送或编辑种子候选列表。
+
+        :param torrents: 按原顺序展示的候选项；种子上下文需含媒体信息，空列表按失败处理
+        :param userid: 接收用户标识；默认使用该用户最近会话，无记录时用用户标识，未指定时用默认会话
+        :param title: 列表标题
+        :param link: 列表末尾链接；当前实现会被最后一项种子详情地址覆盖
+        :param buttons: 按行排列的链接或回调按钮
+        :param original_message_id: 与原会话同时提供时编辑该消息
+        :param original_chat_id: 显式原会话标识，优先于普通用户映射
+        :param stop_typing: 是否在操作收尾时请求停止输入状态，默认 False
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :return: 编辑时返回成功布尔值，发送时返回最后一条 Bot API 消息字典；异常返回 False，配置缺失或发送无结果返回 None
         """
         if not self._telegram_token or not self._telegram_chat_id:
             return None
 
-        # 资源列表是搜索交互的常见出口，默认在发送后结束 typing。
+        # 资源列表发送结束后是否停止输入状态，由 stop_typing 明确控制。
         chat_id = self._determine_target_chat_id(userid, original_chat_id)
         parse_mode = self._normalize_parse_mode(parse_mode)
         try:
@@ -1121,14 +1414,12 @@ class Telegram:
             if link:
                 caption = f"{caption}\n{self._format_detail_link(link, parse_mode)}"
 
-            # 创建按钮键盘
             reply_markup = None
             if buttons:
                 reply_markup = self._create_inline_keyboard(buttons)
 
-            # 判断是编辑消息还是发送新消息
             if original_message_id and original_chat_id:
-                # 编辑消息（种子消息通常没有图片）
+                # 原消息和会话同时存在时替换该消息内容
                 return self.__edit_message(
                     original_chat_id,
                     original_message_id,
@@ -1138,7 +1429,6 @@ class Telegram:
                     parse_mode=parse_mode,
                 )
             else:
-                # 发送新消息
                 return self.__send_request(
                     userid=chat_id,
                     image=image,
@@ -1156,7 +1446,8 @@ class Telegram:
     @staticmethod
     def _create_inline_keyboard(buttons: List[List[Dict]]) -> JsonDict:
         """
-        创建内联键盘
+        创建内联键盘。
+
         :param buttons: 按钮配置，格式：[[{"text": "按钮文本", "callback_data": "回调数据", "url": "链接"}]]
         :return: Bot API InlineKeyboardMarkup 结构
         """
@@ -1165,10 +1456,8 @@ class Telegram:
             button_row = []
             for button in row:
                 if "url" in button:
-                    # URL按钮
                     btn = {"text": button["text"], "url": button["url"]}
                 else:
-                    # 回调按钮
                     btn = {"text": button["text"], "callback_data": button["callback_data"]}
                 button_row.append(btn)
             keyboard.append(button_row)
@@ -1181,7 +1470,12 @@ class Telegram:
             show_alert: bool = False,
     ) -> Optional[bool]:
         """
-        回应回调查询
+        确认按钮回调并可显示提示。
+
+        :param callback_query_id: Telegram 按钮回调标识
+        :param text: 可选提示正文
+        :param show_alert: 是否以弹窗展示提示
+        :return: 调用未抛错时返回 True；异常返回 False；客户端未初始化返回 None
         """
         if not self._bot:
             return None
@@ -1199,22 +1493,21 @@ class Telegram:
             self, message_id: int, chat_id: Optional[int] = None
     ) -> Optional[bool]:
         """
-        删除Telegram消息
-        :param message_id: 消息ID
-        :param chat_id: 聊天ID
-        :return: 删除是否成功
+        删除指定会话或默认会话中的消息。
+
+        :param message_id: 原消息标识
+        :param chat_id: 目标会话；为空时使用默认会话
+        :return: 删除成功返回 True，失败返回 False；配置缺失返回 None
         """
         if not self._telegram_token or not self._telegram_chat_id:
             return None
 
         try:
-            # 确定要删除消息的聊天ID
             if chat_id:
                 target_chat_id = chat_id
             else:
                 target_chat_id = self._telegram_chat_id
 
-            # 删除消息
             result = self._api.delete_message(
                 chat_id=target_chat_id, message_id=int(message_id)
             )
@@ -1244,19 +1537,23 @@ class Telegram:
             rich_message: Optional[str] = None,
     ) -> Optional[bool]:
         """
-        编辑Telegram消息（公开方法）
-        :param chat_id: 聊天ID
-        :param message_id: 消息ID
-        :param text: 新的消息内容
-        :param title: 消息标题
-        :param buttons: 新的按钮列表
-        :param stop_typing: 编辑完成后是否立即停止 typing
-        :param parse_mode: Telegram 消息格式类型，默认 MarkdownV2，可传 HTML
-        :param rich_message: 完整的 Telegram Rich Markdown 正文，设置后替代普通文本
-        :return: 编辑是否成功
+        限频更新原消息，富文本失败时尝试纯文本回退。
+
+        :param chat_id: 原会话标识
+        :param message_id: 原消息标识
+        :param text: 完整的新正文
+        :param title: 可选新标题
+        :param buttons: 新的内联按钮布局
+        :param stop_typing: 是否在操作收尾时请求停止输入状态，默认 False
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :param rich_message: 可选富文本正文；非空时覆盖普通标题和正文
+        :return: 更新成功或内容未变化返回 True；限流、空内容或失败返回 False；客户端缺失返回 None
         """
         if not self._bot:
             return None
+
+        if not self._reserve_edit(chat_id, message_id):
+            return False
 
         parse_mode = self._normalize_parse_mode(parse_mode)
         try:
@@ -1271,35 +1568,45 @@ class Telegram:
                     reply_markup=reply_markup,
                 )
                 if result:
+                    self._mark_edit_succeeded(chat_id, message_id)
                     return True
+                if self._is_chat_rate_limited(chat_id):
+                    return False
                 # Rich Message 编辑失败时降级为纯文本覆盖，避免回复停留在旧内容。
                 logger.warning(
                     f"Telegram Rich Message 编辑失败，降级为纯文本：chat_id={chat_id}"
                 )
-                return self.__edit_plain_fallback(
+                fallback_result = self.__edit_plain_fallback(
                     chat_id=str(chat_id),
                     message_id=int(message_id),
                     rich_message=rich_message,
                     reply_markup=reply_markup,
                 )
+                if fallback_result:
+                    self._mark_edit_succeeded(chat_id, message_id)
+                return fallback_result
 
-            # 组合标题和文本
             if title:
                 bold_title = self._format_title(title, parse_mode)
-                caption = f"{bold_title}\n{text}" if text else bold_title
+                caption = f"{bold_title}\n{text}" if text else (bold_title or "")
             elif text:
                 caption = text
             else:
                 return False
 
-            return self.__edit_message(
+            edit_result = self.__edit_message(
                 chat_id=str(chat_id),
                 message_id=int(message_id),
                 text=caption,
                 buttons=buttons,
                 parse_mode=parse_mode,
             )
+            if edit_result:
+                self._mark_edit_succeeded(chat_id, message_id)
+            return edit_result
         except Exception as e:
+            if self._is_rate_limit_error(e):
+                self._mark_rate_limit(chat_id, e)
             logger.error(f"编辑Telegram消息异常: {str(e)}")
             return False
         finally:
@@ -1386,7 +1693,8 @@ class Telegram:
             parse_mode: Optional[str] = None,
     ) -> Optional[bool]:
         """
-        编辑已发送的消息
+        编辑已发送的消息。
+
         :param chat_id: 聊天ID
         :param message_id: 消息ID
         :param text: 新的消息内容
@@ -1401,13 +1709,11 @@ class Telegram:
 
         parse_mode = self._normalize_parse_mode(parse_mode)
         try:
-            # 创建按钮键盘
             reply_markup = None
             if buttons:
                 reply_markup = self._create_inline_keyboard(buttons)
 
             if image:
-                # 如果有图片，使用edit_message_media
                 media = {
                     "type": "photo",
                     "media": image,
@@ -1422,7 +1728,6 @@ class Telegram:
                     reply_markup=reply_markup,
                 )
             else:
-                # 如果没有图片，使用edit_message_text
                 return self.__edit_message_text_or_caption(
                     chat_id=chat_id,
                     message_id=message_id,
@@ -1433,6 +1738,9 @@ class Telegram:
                 )
             return True
         except Exception as e:
+            if self._is_rate_limit_error(e):
+                self._mark_rate_limit(chat_id, e)
+                return False
             if self.__is_message_not_modified_error(e):
                 logger.debug(f"Telegram消息内容未变化，跳过编辑：{str(e)}")
                 return True
@@ -1507,6 +1815,9 @@ class Telegram:
             if self.__is_message_not_modified_error(err):
                 logger.debug(f"Telegram消息内容未变化，跳过编辑：{str(err)}")
                 return True
+            if self._is_rate_limit_error(err):
+                self._mark_rate_limit(chat_id, err)
+                return False
             logger.error(f"编辑 Telegram Rich Message 失败：{str(err)}")
             return False
 
@@ -1542,6 +1853,9 @@ class Telegram:
             if self.__is_message_not_modified_error(err):
                 logger.debug(f"Telegram消息内容未变化，跳过编辑：{str(err)}")
                 return True
+            if self._is_rate_limit_error(err):
+                self._mark_rate_limit(chat_id, err)
+                return False
             logger.error(f"Telegram Rich Message 降级为纯文本编辑仍失败：{str(err)}")
             return False
 
@@ -1585,6 +1899,8 @@ class Telegram:
             # 保留 Telegram 返回的原始描述（错误码、description），否则日志只剩
             # “发送失败”四个字，无法定位是内容非法还是接口不匹配。
             if _is_non_retryable_api_error(err):
+                if self._is_rate_limit_error(err):
+                    self._mark_rate_limit(chat_id, err, operation="发送")
                 raise NonRetryableTelegramError(
                     f"发送 Telegram Rich Message 失败：{err}"
                 ) from err
@@ -1626,6 +1942,8 @@ class Telegram:
                 message_thread_id=topic_kwargs.get("message_thread_id"),
             )
         except Exception as err:
+            if self._is_rate_limit_error(err):
+                self._mark_rate_limit(chat_id, err, operation="发送")
             logger.error(f"Telegram Rich Message 降级为纯文本发送仍失败：{err}")
             return None
 
@@ -1640,12 +1958,16 @@ class Telegram:
             reply_to_message_id: Optional[int] = None,
     ):
         """
-        向Telegram发送报文，返回发送的消息对象
-        :param reply_markup: 内联键盘
-        :param disable_web_page_preview: 是否禁用链接预览
-        :param parse_mode: Telegram 消息格式类型，默认 MarkdownV2，可传 HTML
-        :param reply_to_message_id: 回复的原消息ID
-        :return: 发送成功返回消息对象，失败返回None
+        按内容长度和媒体类型拆分并发送普通消息。
+
+        :param userid: 目标会话标识；为空时使用默认会话
+        :param image: 可选封面地址，先下载为字节再发送
+        :param caption: 已组合标题、正文和链接的完整内容
+        :param reply_markup: 首条消息的内联键盘或强制回复结构
+        :param disable_web_page_preview: 是否禁用文本链接预览
+        :param parse_mode: 消息格式，默认 MarkdownV2；支持 HTML 和 plain 纯文本
+        :param reply_to_message_id: 发送消息回复的原消息标识
+        :return: 最后一条发送的 Bot API 消息；失败返回 None，已发送的分块不会撤回
         """
         parse_mode = self._normalize_parse_mode(parse_mode)
         kwargs: Dict[str, Any] = {
@@ -1656,7 +1978,6 @@ class Telegram:
         kwargs.update(self._topic_kwargs(kwargs["chat_id"]))
         if reply_to_message_id:
             kwargs["reply_to_message_id"] = reply_to_message_id
-        # 处理图片
         image = self.__process_image(image)
 
         try:
@@ -1691,7 +2012,7 @@ class Telegram:
     @staticmethod
     def __process_image(image_url: Optional[str]) -> Optional[bytes]:
         """
-        处理图片URL，获取图片内容
+        处理图片URL，获取图片内容。
         """
         if not image_url:
             return None
@@ -1704,14 +2025,15 @@ class Telegram:
     def __send_short_message(self, image: Optional[bytes], caption: str,
                              disable_web_page_preview: Optional[bool] = None, **kwargs):
         """
-        发送短消息
+        发送短消息。
         """
         parse_mode = kwargs.get("parse_mode")
         try:
             if image:
-                return self._api.send_photo(
+                return self.__send_photo_or_text(
                     photo=image,
                     caption=self._prepare_text(caption, parse_mode),
+                    disable_web_page_preview=disable_web_page_preview,
                     **kwargs,
                 )
             else:
@@ -1720,8 +2042,31 @@ class Telegram:
                     disable_web_page_preview=disable_web_page_preview,
                     **kwargs
                 )
-        except Exception:
-            raise RetryException(f"发送{'图片' if image else '文本'}消息失败")
+        except Exception as err:
+            if self._is_rate_limit_error(err):
+                chat_id = kwargs.get("chat_id") or self._telegram_chat_id or ""
+                self._mark_rate_limit(chat_id, err, operation="发送")
+                raise NonRetryableTelegramError(
+                    f"发送 Telegram {'图片' if image else '文本'}消息被限流：{err}"
+                ) from err
+            raise RetryException(f"发送{'图片' if image else '文本'}消息失败：{err}") from err
+
+    def __send_photo_or_text(
+            self, *, photo: Any, caption: Optional[str],
+            disable_web_page_preview: Optional[bool] = None, **kwargs: Any,
+    ) -> Any:
+        """
+        海报上传失败立即降级为同一正文，保留会话、话题和按钮；429 不追加请求。
+        """
+        try:
+            return self._api.send_photo(photo=photo, caption=caption, **kwargs)
+        except Exception as error:
+            if self._is_rate_limit_error(error) or not caption:
+                raise
+            logger.warning(f"Telegram 海报发送失败，改为发送文本：{error}")
+        return self._api.send_message(
+            text=caption, disable_web_page_preview=disable_web_page_preview, **kwargs,
+        )
 
     @retry(RetryException, logger=logger)
     def __send_long_plain_message(
@@ -1733,7 +2078,17 @@ class Telegram:
             **kwargs,
     ):
         """
-        按 Telegram 长度限制发送长文本。
+        按字符上限拆分普通或 HTML 正文并发送各分块。
+
+        键盘仅附在第一块。非限流异常由装饰器重试整个方法，已成功的分块可能再次发送；
+        限流时记录会话冷却并停止立即重试。
+
+        :param image: 可选图片字节，仅用于第一块
+        :param caption: 完整正文，HTML 标签不在此方法重新配平
+        :param caption_limit: 每块字符上限；图片说明通常为 1024，纯文本为 4096
+        :param disable_web_page_preview: 是否关闭文本分块的链接预览
+        :param kwargs: 目标会话、解析格式、话题、回复和键盘参数
+        :return: 最后一条发送的 Bot API 消息
         """
         reply_markup = kwargs.pop("reply_markup", None)
         chunks = self._split_plain_text(caption, caption_limit)
@@ -1742,11 +2097,12 @@ class Telegram:
             for index, chunk in enumerate(chunks):
                 current_reply_markup = reply_markup if index == 0 else None
                 if image and index == 0:
-                    ret = self._api.send_photo(
+                    ret = self.__send_photo_or_text(
                         **kwargs,
                         photo=image,
                         caption=chunk,
                         reply_markup=current_reply_markup,
+                        disable_web_page_preview=disable_web_page_preview,
                     )
                     continue
                 msg_kwargs = dict(**kwargs)
@@ -1759,6 +2115,12 @@ class Telegram:
                 )
             return ret
         except Exception as err:
+            if self._is_rate_limit_error(err):
+                chat_id = kwargs.get("chat_id") or self._telegram_chat_id or ""
+                self._mark_rate_limit(chat_id, err, operation="发送")
+                raise NonRetryableTelegramError(
+                    f"发送 Telegram 长消息被限流：{err}"
+                ) from err
             raise RetryException("长消息发送失败") from err
 
     @retry(RetryException, logger=logger)
@@ -1767,7 +2129,16 @@ class Telegram:
             disable_web_page_preview: Optional[bool] = None, **kwargs
     ):
         """
-        发送长消息
+        通过 Markdown 转换器拆分长消息，并跳过已经发送的分块。
+
+        转换器可产生文字、图片或文件；键盘只附在第一个分块，失败重试不会撤回先前分块。
+
+        :param image: 可选首块封面字节
+        :param caption: 待转换的完整 Markdown 正文
+        :param sent_idx: 已成功发送的分块下标集合，会原地更新并用于装饰器重试时去重
+        :param disable_web_page_preview: 是否关闭文本分块的链接预览
+        :param kwargs: 目标会话、解析格式、话题、回复和键盘参数
+        :return: 本次发送的最后一条 Bot API 消息；无新分块时为 None
         """
 
         reply_markup = kwargs.pop("reply_markup", None)
@@ -1798,7 +2169,7 @@ class Telegram:
                     )
 
                 elif item.content_type == ContentTypes.PHOTO or (image and i == 0):
-                    ret = self._api.send_photo(
+                    ret = self.__send_photo_or_text(
                         **kwargs,
                         photo=(
                             getattr(item, "file_name", ""),
@@ -1806,6 +2177,7 @@ class Telegram:
                         ),
                         caption=self._telegramify_item_caption(item),
                         reply_markup=current_reply_markup,
+                        disable_web_page_preview=disable_web_page_preview,
                     )
 
                 elif item.content_type == ContentTypes.FILE:
@@ -1819,6 +2191,12 @@ class Telegram:
                 sent_idx.add(i)
 
             except Exception as e:
+                if self._is_rate_limit_error(e):
+                    chat_id = kwargs.get("chat_id") or self._telegram_chat_id or ""
+                    self._mark_rate_limit(chat_id, e, operation="发送")
+                    raise NonRetryableTelegramError(
+                        f"发送 Telegram 消息被限流：{e}"
+                    ) from e
                 try:
                     raise RetryException(f"消息 [{i + 1}/{len(boxs)}] 发送失败") from e
                 except NameError:
@@ -1826,13 +2204,14 @@ class Telegram:
 
         return ret
 
-    def register_commands(self, commands: Dict[str, dict]):
+    def register_commands(self, commands: Dict[str, dict]) -> None:
         """
-        注册菜单命令
+        先清除旧菜单，再按输入顺序注册命令。
+
+        :param commands: 以斜杠命令为键的映射，读取 description 作为显示说明；空映射不修改菜单
         """
         if not self._bot:
             return
-        # 设置bot命令
         if commands:
             self._api.delete_my_commands()
             self._api.set_my_commands(
@@ -1842,18 +2221,22 @@ class Telegram:
                 ]
             )
 
-    def delete_commands(self):
+    def delete_commands(self) -> None:
         """
-        清理菜单命令
+        清除机器人菜单命令；客户端未初始化时不执行。
         """
         if not self._bot:
             return
-        # 清理菜单命令
         self._api.delete_my_commands()
 
     def stop(self) -> bool:
         """
-        停止 Telegram 消息接收服务，并返回 polling/typing owner 是否收敛。
+        停止接收新输入状态任务，结束更新分发并关闭客户端。
+
+        停止时最多等待消息处理 10 秒，不等待已经发出的长轮询请求返回。
+        从消息处理线程自身调用时不等待该处理器，返回后不会再分发后续更新。
+
+        :return: 所有输入状态任务收尾且更新分发可安全停止时返回 True，否则返回 False
         """
         converged = True
         with self._typing_lifecycle_lock:

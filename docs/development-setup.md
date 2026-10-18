@@ -215,6 +215,8 @@ uvx --from pip-audit pip-audit \
 Docker 镜像直接基于官方基础镜像构建，只安装应用运行所需的系统依赖；不运行镜像漏洞扫描，
 也不为扫描结果刷新系统包、删除基础镜像自带工具或维护漏洞忽略清单。正式版和 Beta 均直接构建
 并发布标准版与 free-threaded 版的双架构镜像。应用锁定依赖仍按上述流程审计。
+`v3` 分支自动发布仅在 `version.py` 的 `APP_VERSION` 或 `FRONTEND_VERSION` 值发生变化时运行；
+只修改该文件的说明文字不会重建正式镜像。维护者仍可通过手动触发正式发布工作流重建当前版本。
 
 ### 6. Contributor 提交准备
 
@@ -230,6 +232,12 @@ Docker 镜像直接基于官方基础镜像构建，只安装应用运行所需�
 3. **架构与静态检查**：按受影响合同选择架构策略、snapshot 和 ratchet；策略测试先于 snapshot。Pylint 候选范围分别取 PR base 到 HEAD、暂存 diff、未暂存 diff 及本次新文件的并集；以实际待提交的索引 tree 过滤路径并检查内容。仅暂存本次选择的路径/hunks；代码、项目配置与仓内 lint 依赖必须来自同一 tree。只有全部 tracked 工作树与索引一致（`git diff --quiet`）且没有会影响 lint 的额外配置或导入输入时才使用工作树快捷路径，否则（含部分暂存）按 `AGENTS.md` 导出索引验证。这是现有 lint 的输入选择，不增加门禁；大范围 Python 变化在同一待提交 tree 中检查 `app/`。
 4. **最终核对**：复用仍有效的证据，只重跑被后续变化失效的检查；检查最终 diff、`git diff --check` 和工作树。CI 失败归属及维护者预授权按 [协作规则](rules/12-collaboration-and-distribution.md) 处理。
 
+提交前还须按 [注释规范](rules/08-comment-styles.md) 审查本次新增和修改的对象：说明文字使用中文，
+文档字符串使用多行三双引号，参数与返回值统一使用 `:param:` / `:return:` 字段列表，
+dataclass、Pydantic 和 Protocol 的声明项逐项提供说明。Pydantic 字段使用 `Field(description=...)`，
+不得因注释调整改变模型行为。旧文件风格不构成例外；现有 Pylint / Ruff 检查未覆盖全部注释要求，
+检查通过不能代替这项审查。
+
 主仓架构检查不依赖独立插件仓；官方插件兼容观察通过每周或手工工作流单独运行，仅上传语义差异
 报告，不自动更新基线。普通主仓改动不要求额外检出插件仓或运行观察任务。宿主架构门禁和 changed-file
 Pylint 由 `v3` PR/push 的 GitHub Actions 执行，`app/` 全量 Pylint 是建议性报告。
@@ -238,7 +246,11 @@ Pylint 由 `v3` PR/push 的 GitHub Actions 执行，`app/` 全量 Pylint 是建�
 
 Ruff/Mypy 基线只允许收紧，不接受新增诊断或类型错误增长；受治零错误文件由 `mypy.ini` 的
 `files=` 维护。Mypy 完整 ratchet 固定按 Linux/Python 3.14 分析。Coverage job 在 `v3` PR/push
-运行，按 `tests/run.py` 的分片合同执行并合并报告，Application 与 Domain 固定不低于 80%。
+运行，按 `tests/run.py` 的分片合同执行并合并报告，除 `app/plugins` 外全部 `app` 文件按逐文件
+低水位检查，存量只能提升，新文件必须达到 80%。
+逐文件治理以 `mypy.ini` 的严格清单和
+`tests/fixtures/architecture/mypy-baseline.json` 的逐文件、逐错误码低水位为准；
+尚未清零的文件须先确认实际合同和适用门禁，不以定向扫描结果宣称交付。
 每个 Coverage 分片预算为 15 分钟（测试 step 为 10 分钟），报告与 ratchet 为 10 分钟；不得靠
 跳过测试或产物规避超时。Coverage 只接受 GitHub Actions 的 Ubuntu/Python 3.14、locked
 依赖和全量测试工件，本机 macOS 报告仅供诊断，不得写入并提交 canonical baseline。
@@ -257,8 +269,8 @@ uv run --locked --no-sync python scripts/architecture/complexity.py
 ```
 
 `--write` 拒绝接受已有基线上的增长；减少或删除热点后必须固化低水位。
-CI 上传 `complexity-report` 工件，门禁失败时也保留已生成的指标。指标含义、限制与后续扩围见
-[代码门禁说明](code-quality.md)。
+CI 上传 `complexity-report` 工件，门禁失败时也保留已生成的指标。指标口径以
+`scripts/architecture/complexity.py` 与 `scripts/architecture/mypy_ratchet.py` 的实现为准。
 
 ### 7. 参考资源
 

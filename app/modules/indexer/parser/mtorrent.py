@@ -1,14 +1,22 @@
 # -*- coding: utf-8 -*-
+"""
+解析 M-Team 站点的用户资料、流量和做种信息。
+"""
+
 import json
-from typing import Optional, Tuple
+from operator import iadd
+from typing import Optional
 from urllib.parse import urljoin
 
 from app.domain import site as site_rules
-from app.modules.indexer.parser import SiteParserBase, SiteSchema
+from app.modules.indexer.parser import SitePage, SiteParserBase, SiteSchema
 from app.runtime.log import logger
 
 
 class MTorrentSiteUserInfo(SiteParserBase):
+    """
+    解析 MTorrent 站点的用户资料、流量与消息。
+    """
     schema = SiteSchema.MTorrent
     request_mode = "apikey"
 
@@ -34,9 +42,9 @@ class MTorrentSiteUserInfo(SiteParserBase):
         "18": "Bet memberStaff",
     }
 
-    def _parse_site_page(self, html_text: str):
+    def _parse_site_page(self, html_text: SitePage) -> None:
         """
-        获取站点页面地址
+        获取站点页面地址。
         """
         # 更换api地址
         self._base_url = f"https://api.{site_rules.extract_domain(self._base_url)}"
@@ -63,21 +71,23 @@ class MTorrentSiteUserInfo(SiteParserBase):
             "x-api-key": self.apikey,
         }
 
-    def _parse_logged_in(self, html_text):
+    def _parse_logged_in(self, html_text: str) -> bool:
         """
-        判断是否登录成功, 通过判断是否存在用户信息
-        暂时跳过检测，待后续优化
-        :param html_text:
-        :return:
+        API 认证结果由请求响应判定，此入口不检查页面登录标记。
+
+        :param html_text: 未使用的页面文本
+        :return: 始终返回 True
         """
         return True
 
-    def _parse_user_base_info(self, html_text: str):
+    def _parse_user_base_info(self, html_text: SitePage) -> None:
         """
-        解析用户基本信息，这里把_parse_user_traffic_info和_parse_user_detail_info合并到这里
+        解析用户基本信息，这里把_parse_user_traffic_info和_parse_user_detail_info合并到这里。
         """
         if not html_text:
             return None
+        if isinstance(html_text, dict):
+            raise TypeError("the JSON object must be str, bytes or bytearray, not dict")
         detail = json.loads(html_text)
         if not detail or detail.get("code") != "0":
             return
@@ -99,21 +109,21 @@ class MTorrentSiteUserInfo(SiteParserBase):
             "userid": self.userid
         }
 
-    def _parse_user_traffic_info(self, html_text: str):
+    def _parse_user_traffic_info(self, html_text: str) -> None:
         """
-        解析用户流量信息
+        解析用户流量信息。
         """
         pass
 
-    def _parse_user_detail_info(self, html_text: str):
+    def _parse_user_detail_info(self, html_text: str) -> None:
         """
-        解析用户详细信息
+        解析用户详细信息。
         """
         pass
 
     def _parse_user_torrent_seeding_info(self, html_text: str, multi_page: Optional[bool] = False) -> Optional[str]:
         """
-        解析用户做种信息
+        解析用户做种信息。
         """
         if not html_text:
             return None
@@ -161,12 +171,16 @@ class MTorrentSiteUserInfo(SiteParserBase):
         if self.seeding >= seeder_count:
             return None
         # 还有下一页
-        self._torrent_seeding_params["pageNumber"] += 1
+        parameters = self._torrent_seeding_params
+        if parameters is None:
+            raise TypeError("'NoneType' object is not subscriptable")
+        # 保留原有 += 运算及异常，不把动态请求参数强制转换为整数。
+        parameters["pageNumber"] = iadd(parameters["pageNumber"], 1)
         return ""
 
-    def _parse_message_unread_links(self, html_text: str, msg_links: list) -> Optional[str]:
+    def _parse_message_unread_links(self, html_text: str, msg_links: list[str]) -> Optional[str]:
         """
-        解析未读消息链接，这里直接读出详情
+        解析未读消息链接，这里直接读出详情。
         """
         if not html_text:
             return None
@@ -190,8 +204,8 @@ class MTorrentSiteUserInfo(SiteParserBase):
         # 是否存在下页数据
         return None
 
-    def _parse_message_content(self, html_text) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def _parse_message_content(self, html_text: str) -> None:
         """
-        解析消息内容
+        解析消息内容。
         """
         pass

@@ -1,10 +1,11 @@
-"""媒体服务器模块业务样板基类。
+"""
+媒体服务器模块业务样板基类。
 
 沉淀各媒体服务器模块逐字复制的样板：用户辅助认证、媒体存在性检查、
 定时重连与连接测试。服务器差异（认证 API、存在性检查端点、连接探测方式）
 通过类属性与钩子方法保留在各模块。
 """
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from app.application.mediaserver import MusicMediaServerHelper
 from app.domain.context import MediaInfo
@@ -31,15 +32,16 @@ class _MediaServerModuleBase(_ModuleBase, _MediaServerBase[TService]):
             service_name: Optional[str] = None,
     ) -> Optional[_SchemaAuthCredentials]:
         """
-        使用媒体服务器用户辅助完成用户认证
+        使用媒体服务器用户辅助完成用户认证。
 
         :param credentials: 认证数据
         :param service_name: 指定要认证的媒体服务器名称，若为 None 则认证所有服务器
-        :return: 认证数据
+        :return: 成功时返回已写入渠道、服务名和令牌的原凭据；不适用或所有服务认证失败时返回 None
         """
         if not credentials or credentials.grant_type != "password":
             return None
         # 确定要认证的服务器列表
+        servers: Iterable[tuple[Optional[str], TService]]
         if service_name:
             # 如果指定了服务名，获取该服务实例
             servers = (
@@ -81,13 +83,14 @@ class _MediaServerModuleBase(_ModuleBase, _MediaServerBase[TService]):
             server: Optional[str] = None,
     ) -> Optional[_SchemaExistMediaInfo]:
         """
-        判断媒体文件是否存在
+        判断媒体文件是否存在。
 
         :param mediainfo:  识别的媒体信息
         :param itemid:  媒体服务器ItemID
         :param server:  媒体服务器名称
         :return: 如不存在返回None，存在时返回信息，包括每季已存在所有集{type: movie/tv, seasons: {season: [episodes]}}
         """
+        servers: Iterable[tuple[Optional[str], Optional[TService]]]
         if server:
             servers = [(server, self.get_instance(server))]
         else:
@@ -157,7 +160,9 @@ class _MediaServerModuleBase(_ModuleBase, _MediaServerBase[TService]):
 
     def scheduler_job(self) -> None:
         """
-        定时任务，每10分钟调用一次
+        巡检已配置媒体服务器，对失活连接发起重连。
+
+        由模块调度器每十分钟调用一次。
         """
         # 定时重连
         for name, server in self.get_instances().items():
@@ -173,7 +178,9 @@ class _MediaServerModuleBase(_ModuleBase, _MediaServerBase[TService]):
 
     def test(self) -> Optional[Tuple[bool, str]]:
         """
-        测试模块连接性
+        检查已配置媒体服务器，遇到首个不可用实例即返回失败。
+
+        :return: 是否就绪与失败说明；没有实例时返回 None
         """
         if not self.get_instances():
             return None
@@ -183,7 +190,7 @@ class _MediaServerModuleBase(_ModuleBase, _MediaServerBase[TService]):
                 return False, error
         return True, ""
 
-    def _test_server(self, server, name: str) -> Optional[str]:
+    def _test_server(self, server, name: Optional[str]) -> Optional[str]:
         """
         连接测试钩子，返回失败信息，None 表示就绪，子类可覆写。
         """

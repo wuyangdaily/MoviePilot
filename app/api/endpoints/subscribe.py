@@ -1,3 +1,7 @@
+"""
+提供订阅查询、创建、修改和控制接口。
+"""
+
 from typing import Annotated, Any, List, Optional
 
 import cn2an
@@ -69,9 +73,11 @@ from app.runtime.execution import run_in_threadpool
 from app.runtime.log import logger
 from app.runtime.tasks import TaskRegistry
 from app.schemas.common import IdData as _SchemaIdData
+from app.schemas.context import MediaInfo as _SchemaMediaInfo
 from app.schemas.media import normalize_media_source, resolve_media_identity
 from app.schemas.response import Response as _SchemaResponse
 from app.schemas.subscribe import SubscrbieInfo as _SchemaSubscrbieInfo
+from app.schemas.subscribe import Subscribe as _SchemaSubscribe
 from app.schemas.subscribe import SubscribeDeletionResult as _SchemaSubscribeDeletionResult
 from app.schemas.subscribe import SubscribeShare as _SchemaSubscribeShare
 from app.schemas.subscribe import SubscribeShareStatistics as _SchemaSubscribeShareStatistics
@@ -84,8 +90,6 @@ from app.schemas.types import (
     MediaType,
     SystemConfigKey,
 )
-from app.schemas.workflow import MediaInfo as _SchemaMediaInfo
-from app.schemas.workflow import Subscribe as _SchemaSubscribe
 
 router = ResponseAPIRouter()
 router.routes.extend(subscribe_maintenance_router.routes)
@@ -100,7 +104,9 @@ __all__ = [
 
 
 def _public_subscription_message(message: Optional[object]) -> str:
-    """延迟加载订阅错误转换器，避免启动阶段增加宿主模块。"""
+    """
+    延迟加载订阅错误转换器，避免启动阶段增加宿主模块。
+    """
     from app.runtime.errors import public_error_message
 
     return public_error_message(message, context="subscription")
@@ -110,7 +116,9 @@ async def _attach_execution_status(
     subscribes: list[_SchemaSubscribe],
     status_service: object,
 ) -> list[_SchemaSubscribe]:
-    """批量附加当前执行状态，保持无执行记录时的旧响应形状。"""
+    """
+    批量附加当前执行状态，保持无执行记录时的旧响应形状。
+    """
     loader = getattr(status_service, "for_subscriptions", None)
     if not callable(loader):
         return subscribes
@@ -180,7 +188,9 @@ def matches_subscribe_music_type(
     subscribe: Any,
     music_type: Optional[str],
 ) -> bool:
-    """匹配订阅音乐实体，并把迁移前未标注类型的历史记录兼容为单曲。"""
+    """
+    匹配订阅音乐实体，并把迁移前未标注类型的历史记录兼容为单曲。
+    """
     if not music_type:
         return True
     subscribe_music_type = getattr(subscribe, "music_type", None)
@@ -222,7 +232,7 @@ async def list_subscribes(
     response: Response = None,
     query: SubscriptionQueryService = Depends(get_subscription_query_service),
     status_service: SubscriptionExecutionStatusService = Depends(get_subscription_execution_status_service),
-    _: Annotated[str, Depends(verify_apitoken)] = None,
+    _: Optional[Annotated[str, Depends(verify_apitoken)]] = None,
     page: CompatiblePageParam = None,
     count: CompatibleCountParam = None,
 ) -> Any:
@@ -621,27 +631,54 @@ async def popular_subscribes(
         ret_medias = []
         for sub in subscribes:
             # 订阅人数
-            count = sub.get("count")
+            raw_count = sub.get("count")
+            count = (
+                int(raw_count)
+                if isinstance(raw_count, (int, float, str)) and str(raw_count).strip()
+                else 0
+            )
             if min_sub and count < min_sub:
                 continue
             media = MediaInfo()
-            media.type = MediaType.from_agent(sub.get("type")) or MediaType(sub.get("type"))
-            media.media_source = normalize_media_source(sub.get("media_source"))
-            media.media_id = str(sub.get("media_id")) if sub.get("media_id") is not None else None
+            raw_type = sub.get("type")
+            if not isinstance(raw_type, str):
+                continue
+            media.type = MediaType.from_agent(raw_type) or MediaType(raw_type)
+            raw_source = sub.get("media_source")
+            if isinstance(raw_source, str):
+                normalized_source = normalize_media_source(raw_source)
+                if normalized_source is not None:
+                    media.media_source = normalized_source
+            raw_media_id = sub.get("media_id")
+            if raw_media_id is not None:
+                media.media_id = str(raw_media_id)
             # 处理标题
-            title = sub.get("name")
-            season = sub.get("season")
-            if season not in (None, "") and int(season) != 1:
+            raw_title = sub.get("name")
+            title = str(raw_title) if raw_title is not None else ""
+            raw_season = sub.get("season")
+            season = int(raw_season) if isinstance(raw_season, (int, float, str)) and str(raw_season).strip() else None
+            if season is not None and season != 1:
                 # 小写数据转大写
                 season_str = cn2an.an2cn(season, "low")
                 title = f"{title} 第{season_str}季"
             media.title = title
-            media.year = sub.get("year")
-            media.season = sub.get("season")
-            media.overview = sub.get("description")
-            media.vote_average = sub.get("vote")
-            media.poster_path = sub.get("poster")
-            media.backdrop_path = sub.get("backdrop")
+            raw_year = sub.get("year")
+            if isinstance(raw_year, (int, float, str)) and str(raw_year).strip():
+                media.year = int(raw_year)
+            if season is not None:
+                media.season = season
+            raw_description = sub.get("description")
+            if raw_description is not None:
+                media.overview = str(raw_description)
+            raw_vote = sub.get("vote")
+            if isinstance(raw_vote, (int, float, str)) and str(raw_vote).strip():
+                media.vote_average = float(raw_vote)
+            raw_poster = sub.get("poster")
+            if raw_poster is not None:
+                media.poster_path = str(raw_poster)
+            raw_backdrop = sub.get("backdrop")
+            if raw_backdrop is not None:
+                media.backdrop_path = str(raw_backdrop)
             media.popularity = count
             ret_medias.append(media)
         return [media.to_dict() for media in ret_medias]
@@ -711,6 +748,8 @@ async def subscribe_share(
         name=current_user.name,
         is_superuser=current_user.is_superuser,
     )
+    if sub.subscribe_id is None or sub.share_title is None or sub.share_comment is None or sub.share_user is None:
+        return _SchemaResponse(success=False, message="订阅分享参数不完整")
     subscribe = await mutation.get_accessible(sub.subscribe_id, actor)
     if not subscribe:
         return _SchemaResponse(success=False, message="订阅不存在")
@@ -752,7 +791,7 @@ async def subscribe_fork(
         if not hasattr(_SchemaSubscribe(), key):
             sub_dict.pop(key)
     result = await create_subscribe(subscribe_in=_SchemaSubscribe(**sub_dict), current_user=current_user)
-    if result.success:
+    if result.success and sub.id is not None:
         await MoviePilotServerHelper.async_sub_fork(share_id=sub.id)
     return result
 

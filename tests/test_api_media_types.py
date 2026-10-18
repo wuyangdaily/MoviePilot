@@ -1,4 +1,6 @@
-"""验证 API 将 Agent 英文类型与原生中文类型传入相同业务分支。"""
+"""
+验证 API 将 Agent 英文类型与原生中文类型传入相同业务分支。
+"""
 
 import asyncio
 from types import SimpleNamespace
@@ -38,7 +40,9 @@ METADATA_ENDPOINTS = [
 def test_metadata_endpoints_route_media_types(
     monkeypatch, type_name, expected, module, chain_name, endpoint, operation, id_key,
 ) -> None:
-    """影视英文和中文类型选择相同方法，音乐类型保持空列表。"""
+    """
+    影视英文和中文类型选择相同方法，音乐类型保持空列表。
+    """
     movie_call = AsyncMock(return_value=[])
     tv_call = AsyncMock(return_value=[])
     chain = SimpleNamespace(**{
@@ -59,7 +63,9 @@ def test_metadata_endpoints_route_media_types(
 
 @pytest.mark.parametrize("type_name,expected", MEDIA_TYPES)
 def test_media_detail_forwards_normalized_type(monkeypatch, type_name, expected) -> None:
-    """详情入口应将三类中英文类型都转换成枚举再交给识别链。"""
+    """
+    详情入口应将三类中英文类型都转换成枚举再交给识别链。
+    """
     recognize = AsyncMock(return_value=None)
     monkeypatch.setattr(media, "MediaChain", lambda: SimpleNamespace(
         async_recognize_media=recognize,
@@ -76,7 +82,9 @@ def test_media_detail_forwards_normalized_type(monkeypatch, type_name, expected)
 
 @pytest.mark.parametrize("type_name,expected", MEDIA_TYPES)
 def test_create_subscription_forwards_normalized_type(monkeypatch, type_name, expected) -> None:
-    """新增订阅应兼容 Agent 类型，并向订阅链传入准确枚举。"""
+    """
+    新增订阅应兼容 Agent 类型，并向订阅链传入准确枚举。
+    """
     add = AsyncMock(return_value=(1, ""))
     monkeypatch.setattr(subscribe, "SubscribeChain", lambda: SimpleNamespace(async_add=add))
 
@@ -91,7 +99,9 @@ def test_create_subscription_forwards_normalized_type(monkeypatch, type_name, ex
 
 @pytest.mark.parametrize("type_name,expected", MEDIA_TYPES)
 def test_popular_subscriptions_normalize_record_type(monkeypatch, type_name, expected) -> None:
-    """共享订阅记录使用英文类型时，公开响应仍输出原生中文类型。"""
+    """
+    共享订阅记录使用英文类型时，公开响应仍输出原生中文类型。
+    """
     statistic = AsyncMock(return_value=[{
         "name": "测试媒体", "type": type_name, "count": 1,
     }])
@@ -105,9 +115,62 @@ def test_popular_subscriptions_normalize_record_type(monkeypatch, type_name, exp
     assert result[0]["type"] == expected.value
 
 
+def test_popular_subscriptions_preserves_optional_fields_and_filters_invalid_records(monkeypatch) -> None:
+    """热门订阅应转换可选字段，并跳过类型或人数无效的记录。"""
+    statistic = AsyncMock(return_value=[
+        {
+            "name": "测试媒体",
+            "type": "tv",
+            "count": "2",
+            "media_source": "tmdb",
+            "media_id": 123,
+            "season": "2",
+            "year": "2024",
+            "description": "简介",
+            "vote": "8.5",
+            "poster": "/poster",
+            "backdrop": "/backdrop",
+        },
+        {"name": "无类型", "count": 3},
+        {"name": "无人数", "type": "movie", "count": ""},
+    ])
+    monkeypatch.setattr(
+        subscribe.MoviePilotServerHelper, "async_get_subscribe_statistic", statistic,
+    )
+
+    result = asyncio.run(subscribe.popular_subscribes(stype="all"))
+
+    assert len(result) == 2
+    assert result[0]["type"] == MediaType.TV.value
+    assert result[0]["media_id"] == "123"
+    assert result[0]["season"] == 2
+    assert result[0]["year"] == 2024
+    assert result[0]["vote_average"] == 8.5
+    assert result[1]["type"] == MediaType.MOVIE.value
+
+
+def test_share_subscribe_rejects_incomplete_payload() -> None:
+    """分享订阅缺少必要字段时应直接返回参数错误。"""
+    from app.api.endpoints.subscribe import subscribe_share
+    from app.schemas.subscribe import SubscribeShare
+
+    response = asyncio.run(
+        subscribe_share(
+            sub=SubscribeShare(subscribe_id=7, share_title=None, share_comment="", share_user="alice"),
+            mutation=Mock(),
+            current_user=SimpleNamespace(name="alice", is_superuser=False),
+        )
+    )
+
+    assert not response.success
+    assert response.message == "订阅分享参数不完整"
+
+
 @pytest.mark.parametrize("type_name,expected", MEDIA_TYPES + [(None, MediaType.UNKNOWN)])
 def test_library_missing_forwards_meta_type(monkeypatch, type_name, expected) -> None:
-    """缺失查询应向下载链传入解析后的类型，空值沿用标题推断。"""
+    """
+    缺失查询应向下载链传入解析后的类型，空值沿用标题推断。
+    """
     missing = Mock(return_value=(True, {}))
     monkeypatch.setattr(mediaserver, "DownloadChain", lambda: SimpleNamespace(
         get_no_exists_info=missing,
@@ -124,7 +187,9 @@ def test_library_missing_forwards_meta_type(monkeypatch, type_name, expected) ->
     (None, None), ("", None), ("自动", None), ("auto", None), ("none", None),
 ])
 def test_manual_transfer_forwards_normalized_type(monkeypatch, type_name, expected) -> None:
-    """手动整理兼容中英文类型，并保留未指定和自动识别语义。"""
+    """
+    手动整理兼容中英文类型，并保留未指定和自动识别语义。
+    """
     execute = Mock(return_value=(True, ""))
     monkeypatch.setattr(transfer, "TransferChain", lambda: SimpleNamespace(manual_transfer=execute))
 
@@ -142,7 +207,9 @@ def test_manual_transfer_forwards_normalized_type(monkeypatch, type_name, expect
 
 
 def test_manual_transfer_rejects_invalid_type_before_execution(monkeypatch) -> None:
-    """非法媒体类型应保持失败响应，不能启动实际整理。"""
+    """
+    非法媒体类型应保持失败响应，不能启动实际整理。
+    """
     chain_factory = Mock()
     monkeypatch.setattr(transfer, "TransferChain", chain_factory)
 

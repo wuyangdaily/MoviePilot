@@ -1,3 +1,7 @@
+"""
+解析 RSS 资源并按需匹配媒体信息。
+"""
+
 from typing import Optional
 
 from pydantic import Field
@@ -20,9 +24,9 @@ class FetchRssParams(ActionParams):
     url: str = Field(default=None, description="RSS地址")
     proxy: Optional[bool] = Field(default=False, description="是否使用代理")
     timeout: Optional[int] = Field(default=15, description="超时时间")
-    content_type: Optional[str] = Field(default=None, description="Content-Type")
-    referer: Optional[str] = Field(default=None, description="Referer")
-    ua: Optional[str] = Field(default=None, description="User-Agent")
+    content_type: Optional[str] = Field(default=None, description="请求使用的 Content-Type 头；不传时由客户端决定")
+    referer: Optional[str] = Field(default=None, description="请求使用的 Referer 来源地址；不传时省略")
+    ua: Optional[str] = Field(default=None, description="请求使用的 User-Agent 标识；不传时由客户端决定")
     match_media: Optional[bool] = Field(default=False, description="匹配媒体信息")
 
 
@@ -36,6 +40,11 @@ class FetchRssAction(BaseAction):
     }
 
     def __init__(self, action_id: str):
+        """
+        建立当前动作的资源集合与失败状态。
+
+        :param action_id: 当前工作流动作的标识
+        """
         super().__init__(action_id)
         self._rss_torrents = []
         self._has_error = False
@@ -46,39 +55,49 @@ class FetchRssAction(BaseAction):
 
     @property
     def success(self) -> bool:
+        """
+        返回 RSS 请求和解析过程是否未记录错误。
+
+        :return: 未遇到请求或解析错误时为 True
+        """
         return not self._has_error
 
     def execute(self, workflow_id: int, params: dict, context: ActionContext) -> ActionContext:
         """
-        请求RSS地址获取数据，并解析为资源列表
+        请求 RSS 地址并将解析出的资源加入工作流上下文。
+
+        :param workflow_id: 当前工作流标识，用于检查停止状态
+        :param params: RSS 地址、请求选项和媒体匹配开关
+        :param context: 用于接收解析结果的工作流上下文
+        :return: 原工作流上下文，动作状态按请求结果更新
         """
-        params = FetchRssParams(**params)
-        if not params.url:
+        action_params = FetchRssParams(**params)
+        if not action_params.url:
             return context
 
         headers = {}
-        if params.content_type:
-            headers["Content-Type"] = params.content_type
-        if params.referer:
-            headers["Referer"] = params.referer
-        if params.ua:
-            headers["User-Agent"] = params.ua
+        if action_params.content_type:
+            headers["Content-Type"] = action_params.content_type
+        if action_params.referer:
+            headers["Referer"] = action_params.referer
+        if action_params.ua:
+            headers["User-Agent"] = action_params.ua
 
-        rss_items = RssHelper().parse(url=params.url,
+        rss_items = RssHelper().parse(url=action_params.url,
                                       proxy=(
                                           get_chain_runtime_config_snapshot().proxy
-                                          if params.proxy
+                                          if action_params.proxy
                                           else None
                                       ),
-                                      timeout=params.timeout,
+                                      timeout=action_params.timeout,
                                       headers=headers)
         if rss_items is None or rss_items is False:
-            logger.error(f'RSS地址 {params.url} 请求失败！')
+            logger.error(f'RSS地址 {action_params.url} 请求失败！')
             self._has_error = True
             return context
 
         if not rss_items:
-            logger.error(f'RSS地址 {params.url} 未获取到RSS数据！')
+            logger.error(f'RSS地址 {action_params.url} 未获取到RSS数据！')
             return context
 
         # 组装种子
@@ -96,7 +115,7 @@ class FetchRssAction(BaseAction):
             )
             meta = MetaInfo(title=torrentinfo.title, subtitle=torrentinfo.description)
             mediainfo = None
-            if params.match_media:
+            if action_params.match_media:
                 mediainfo = MediaChain().recognize_by_meta(
                     meta,
                     obtain_images=False,

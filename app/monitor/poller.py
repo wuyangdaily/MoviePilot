@@ -1,3 +1,7 @@
+"""
+按存储快照轮询文件变化并分发整理任务。
+"""
+
 import traceback
 from pathlib import Path, PurePosixPath
 from threading import Lock
@@ -42,7 +46,7 @@ class RemotePoller:
         with self._locks_guard:
             return self._locks.setdefault(storage, Lock())
 
-    def _note_failure(self, storage: str, reason: str):
+    def _note_failure(self, storage: str, reason: str) -> None:
         """
         记录一次轮询异常，连续异常达到阈值时推送告警。
         :param storage: 存储名称
@@ -55,7 +59,7 @@ class RemotePoller:
             self._alert_cb(storage,
                            f"远程目录监控连续 {count} 次异常: {storage}\n原因: {reason}\n将继续按周期重试")
 
-    def _note_success(self, storage: str):
+    def _note_success(self, storage: str) -> None:
         """
         记录一次轮询成功，此前告警过时推送恢复消息。
         :param storage: 存储名称
@@ -65,7 +69,7 @@ class RemotePoller:
         self._failure_counts[storage] = 0
 
     @staticmethod
-    def _snapshot_for_path(snapshot: Dict[str, Dict], mon_path: Path) -> Dict[str, Dict]:
+    def _snapshot_for_path(snapshot: Dict[str, object], mon_path: Path) -> Dict[str, object]:
         """
         提取指定监控目录范围内的快照。
         :param snapshot: 完整存储快照
@@ -161,7 +165,7 @@ class RemotePoller:
                 self._note_failure(storage, str(e))
                 return None
 
-    def _handle_changes(self, storage: str, old_snapshot: dict, new_snapshot: dict):
+    def _handle_changes(self, storage: str, old_snapshot: dict, new_snapshot: dict) -> None:
         """
         比对快照并把变化文件送入整理链。
         :param storage: 存储名称
@@ -231,7 +235,7 @@ class RemotePoller:
             new_snapshot = StorageChain().snapshot_storage(
                 storage=storage,
                 path=mon_path,
-                last_snapshot_time=0  # 全量扫描，不使用增量
+                last_snapshot_time=0
             )
 
             if new_snapshot is None:

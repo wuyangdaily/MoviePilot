@@ -1,4 +1,6 @@
-"""手动和远程整理历史入口及结果消息。"""
+"""
+手动和远程整理历史入口及结果消息。
+"""
 
 import re
 from copy import deepcopy
@@ -18,6 +20,7 @@ from app.domain.context import MediaInfo, MusicAlbumInfo, MusicInfo
 from app.domain.meta.metabase import MetaBase
 from app.runtime.log import logger
 from app.runtime.loop import main_loop_registry
+from app.schemas.file import FileItem
 from app.schemas.message import Message
 from app.schemas.tmdb import TmdbEpisode
 from app.schemas.transfer import EpisodeFormat, TransferInfo
@@ -29,7 +32,6 @@ from app.schemas.types import (
     MessageType,
     NotificationChannel,
 )
-from app.schemas.workflow import FileItem
 
 
 def _recognize_manual_media(
@@ -43,7 +45,9 @@ def _recognize_manual_media(
     music_release_scripts: Optional[list[str]],
     musicbrainz_release_id: Optional[str] = None,
 ) -> Optional[Union[MediaInfo, MusicInfo, MusicAlbumInfo]]:
-    """识别手动指定的媒体，并为音乐专辑保留完整曲目表。"""
+    """
+    识别手动指定的媒体，并为音乐专辑保留完整曲目表。
+    """
     if mtype == MediaType.MUSIC and music_type == MUSIC_ENTITY_ALBUM:
         album = MediaChain().get_music_album(
             media_source=media_source,
@@ -63,7 +67,9 @@ def _recognize_manual_media(
 
 
 class TransferHistoryOwner(_TransferOwnerBase):
-    """唯一持有手动历史、重整命令和通知公开入口。"""
+    """
+    唯一持有手动历史、重整命令和通知公开入口。
+    """
 
     def _run_manual_transfer_request(
             self,
@@ -73,7 +79,9 @@ class TransferHistoryOwner(_TransferOwnerBase):
             skip_success: bool = False,
             music_cue_enable: Optional[bool] = None,
     ) -> Tuple[bool, Union[str, dict[str, Any]]]:
-        """隔离本次 CUE 策略，批次与普通请求均保持既有整理入口兼容。"""
+        """
+        隔离本次 CUE 策略，批次与普通请求均保持既有整理入口兼容。
+        """
         with use_music_cue(music_cue_enable):
             if selected_fileitems is not None or report_results or skip_success:
                 return cast(
@@ -94,15 +102,15 @@ class TransferHistoryOwner(_TransferOwnerBase):
             self,
             arg_str: str,
             channel: NotificationChannel,
-            userid: Union[str, int] = None,
+            userid: Optional[Union[str, int]] = None,
             source: Optional[str] = None,
-    ):
+    ) -> None:
         """
         远程重新整理，参数为历史记录 ID，或媒体来源、原生 ID 与类型。
         """
         from app.runtime.errors import public_error_message
 
-        def args_error():
+        def args_error() -> None:
             self.post_message(
                 Message(
                     channel=channel,
@@ -122,7 +130,6 @@ class TransferHistoryOwner(_TransferOwnerBase):
         if len(arg_strs) not in (1, 2):
             args_error()
             return
-        # 历史记录ID
         logid = arg_strs[0]
         if not logid.isdigit():
             args_error()
@@ -215,6 +222,7 @@ class TransferHistoryOwner(_TransferOwnerBase):
     ) -> Tuple[bool, Union[str, dict[str, Any]]]:
         """
         手动整理，支持复杂条件，带进度显示
+
         :param fileitem: 文件项
         :param target_storage: 目标存储
         :param target_path: 目标路径
@@ -324,9 +332,10 @@ class TransferHistoryOwner(_TransferOwnerBase):
             episodes_info: Optional[List[TmdbEpisode]] = None,
             username: Optional[str] = None,
             buttons: Optional[list[list[dict[str, Any]]]] = None,
-    ):
+    ) -> None:
         """
         通过入库通知模板发送单文件或聚合后的成功结果，不预填标题和正文。
+
         :param meta: 文件元数据
         :param mediainfo: 识别的媒体信息
         :param transferinfo: 文件整理信息
@@ -354,7 +363,9 @@ class TransferHistoryOwner(_TransferOwnerBase):
         )
 
     def notify_successful_transfer(self, task: TransferTask, transferinfo: TransferInfo) -> None:
-        """全局开启时聚合成功结果，目录关闭通知和前台手动整理仍保持静默。"""
+        """
+        全局开启时聚合成功结果，目录关闭通知和前台手动整理仍保持静默。
+        """
         if not transferinfo.target_item or not transferinfo.need_notify or (task.manual and not task.background):
             return
         assert task.meta is not None and task.mediainfo is not None
@@ -362,7 +373,9 @@ class TransferHistoryOwner(_TransferOwnerBase):
             self.queue_successful_transfer_notification(task, transferinfo)
 
     def queue_successful_transfer_notification(self, task: TransferTask, transferinfo: TransferInfo) -> None:
-        """仅缓冲成功展示快照，历史、完成事件和种子状态仍逐任务结算。"""
+        """
+        仅缓冲成功展示快照，历史、完成事件和种子状态仍逐任务结算。
+        """
         assert task.meta is not None and task.mediainfo is not None
         notification = TransferSuccessNotification(
             meta=deepcopy(task.meta),
@@ -384,7 +397,9 @@ class TransferHistoryOwner(_TransferOwnerBase):
             self._send_transfer_success_notifications([notification])
 
     def _send_transfer_success_notifications(self, notifications: list[TransferSuccessNotification]) -> None:
-        """合并真实目标文件及大小，并以专辑、电影或季为模板主体发送批次通知。"""
+        """
+        合并真实目标文件及大小，并以专辑、电影或季为模板主体发送批次通知。
+        """
         if not notifications:
             return
         first = notifications[0]
@@ -421,6 +436,7 @@ class TransferHistoryOwner(_TransferOwnerBase):
     ) -> bool:
         """
         检查文件是否被整理屏蔽词阻止处理
+
         :param file_path: 文件路径
         :param exclude_words: 整理屏蔽词列表
         :return: 如果被屏蔽返回True，否则返回False
@@ -435,26 +451,24 @@ class TransferHistoryOwner(_TransferOwnerBase):
         return False
 
     def _can_delete_torrent(
-            self, download_hash: str, downloader: str, transfer_exclude_words
+            self, download_hash: str, downloader: str, transfer_exclude_words: list[str]
     ) -> bool:
         """
         检查是否可以删除种子文件
+
         :param download_hash: 种子Hash
         :param downloader: 下载器名称
         :param transfer_exclude_words: 整理屏蔽词
         :return: 如果可以删除返回True，否则返回False
         """
         try:
-            # 获取种子信息
             torrents = self.list_torrents(hashs=download_hash, downloader=downloader)
             if not torrents:
                 return False
 
-            # 未下载完成
             if torrents[0].progress < 100:
                 return False
 
-            # 获取种子文件列表
             torrent_files = self.torrent_files(download_hash, downloader)
             if not torrent_files:
                 return False

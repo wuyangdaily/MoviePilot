@@ -1,6 +1,10 @@
+"""
+保存、比较存储快照并调整监控间隔。
+"""
+
 import json
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 from app.runtime.cache import CacheBackend, FileCache
 from app.runtime.log import logger
@@ -148,14 +152,16 @@ class SnapshotStore:
             return False
 
     @staticmethod
-    def compare(old_snapshot: Dict, new_snapshot: Dict) -> Dict[str, List]:
+    def compare(
+        old_snapshot: dict[str, object], new_snapshot: dict[str, object]
+    ) -> dict[str, list[str]]:
         """
         比对快照，找出变化的文件（只处理新增和修改，不处理删除）。
         :param old_snapshot: 旧快照
         :param new_snapshot: 新快照
         :return: 变化信息
         """
-        changes = {
+        changes: dict[str, list[str]] = {
             'added': [],
             'modified': []
         }
@@ -201,10 +207,10 @@ class SnapshotStore:
         :return: 监控间隔（分钟）
         """
         if file_count < 100:
-            return 5  # 5分钟
+            return 5
         elif file_count < 500:
-            return 10  # 10分钟
+            return 10
         elif file_count < 1000:
-            return 15  # 15分钟
+            return 15
         else:
-            return 30  # 30分钟
+            return 30
