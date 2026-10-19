@@ -97,7 +97,8 @@ to make the directory tree look symmetrical.
 | `app/agent/session.py` | Per-session queues, workers, active Agent instances, status projection, cancellation and deferred cleanup |
 | `app/agent/lifecycle.py` | Runtime generation admission, initialization, idle-session collection and bounded manager shutdown |
 | `app/agent/tasks.py` | Background prompts, durable scheduled-task execution and heartbeat wakeups |
-| `app/agent/orchestrator.py` | One `MoviePilotAgent` execution instance: prompt/tool/middleware assembly, model invocation, streaming and per-agent state |
+| `app/agent/orchestrator.py` | One `MoviePilotAgent` execution instance: prompt/tool/middleware assembly, model invocation, streaming and per-agent state; graph resources are registered with the graph owner immediately after acquisition |
+| `app/agent/graph.py` | Session-local compiled graph cache and model/controller ownership: one resource scope follows construction through publication and retirement; publication transfers ownership synchronously, cancellation retains unclosed resources, and consumers finish before their models close. Background learning delays model reclamation; shutdown seals in-flight scopes and refuses late publication. This is an internal owner, not an SDK or Compat export |
 | `app/agent/middleware/plan.py` | Current task objective, step status and evidence in graph state; sanitized snapshots travel through existing message persistence and never authorize tool effects |
 | `app/application/messaging/recall.py` / `app/agent/history/` | Application 持有独立消息库 DTO/Port 和后台维护服务；Agent 专属 SQLite/FTS5 schema、存储、检索、窗口与旧快照导入由 `agent/history/` 拥有，数据库位于 Agent 运行目录且不共享主库 Session。`db/adapters/recall.py` 仅负责一次性旧快照只读导出 |
 | `app/agent/learning/` / `app/agent/middleware/learning.py` | Agent 专属个人技能、稳定记忆和复盘生命周期；独立文件目录按用户隔离，模型仅能调用受控维护工具。`session.py` 管理计数及 TaskRegistry owner，`review.py` 复用最终模型请求并在派发处限制工具，`files.py` 只封装该存储的路径、进程锁与原子替换，不作为通用文件 Adapter。人工提案/技能控制命令经 messaging interaction 契约路由，只有宿主收到的用户原文可以触发，后台快照没有执行权限 |
@@ -766,6 +767,13 @@ qBittorrent/Transmission 用同一规则选择文件。零匹配、目标集不�
 启动结果未知须在下载器核实。添加失败后的已有任务只按原始种子或磁力 v1/v2 哈希确认，禁止名称/大小兜底。
 Module dispatcher 仅对合同明确声明的新增可选参数兼容旧签名；支持该参数或 `**kwargs` 的 provider
 完整接收参数，其他未知参数仍按原规则失败，不能用过滤掩盖 provider ABI 错误。
+
+媒体服务器查询的内容组与不可变选项由 `app.schemas.mediaserver` 的 `MediaServerField` 和
+`MediaServerQueryOptions` 定义；插件从 `app.sdk.services` 导入。链通过显式登记的可选 `query`
+参数传递内容需求，具体服务器协议翻译归各客户端；Emby/Jellyfin 公用的参数编译位于
+`app.modules._base.mediaserver`。应用服务与链不拼装 Emby 字段名或 Plex SDK 参数。
+默认选项保留旧行为，显式投影必须作用于真实请求与附加查询，不能用下载后丢字段替代远端裁剪。
+协议限制与各调用方需要的内容见 [媒体查询内容契约](../media-server-query.md)。
 
 SMB 同存储整理由 `app.modules.filemanager.storages.smb` 持有协议调用边界：
 复制调用 `smbclient.copyfile`（CopyChunk），共享内移动调用 `smbclient.rename`，硬链接调用

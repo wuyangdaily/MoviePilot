@@ -114,8 +114,7 @@
     "no-any-return": 6,
     "no-untyped-def": 6,
     "type-arg": 12,
-    "union-attr": 3,
-    "var-annotated": 1
+    "union-attr": 3
   },
   "app/agent/skills/registry.py": {
     "misc": 3,
@@ -293,7 +292,6 @@
   },
   "app/api/endpoints/subscribe.py": {
     "arg-type": 5,
-    "assignment": 1,
     "no-any-return": 1,
     "no-untyped-def": 1,
     "type-arg": 2
@@ -386,7 +384,6 @@
   },
   "app/chain/mediaserver.py": {
     "arg-type": 3,
-    "assignment": 2,
     "misc": 2,
     "no-any-return": 5,
     "type-arg": 1
