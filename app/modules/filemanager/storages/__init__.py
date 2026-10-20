@@ -344,13 +344,20 @@ class StorageBase(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def copy(self, fileitem: _SchemaFileItem, path: Path, new_name: str) -> bool:
+    def copy(
+        self,
+        fileitem: _SchemaFileItem,
+        path: Path,
+        new_name: str,
+        **kwargs: Any,
+    ) -> bool:
         """
         复制文件到同一存储的目标目录。
 
         :param fileitem: 源文件项
         :param path: 同一存储中的目标目录
         :param new_name: 目标文件名
+        :param kwargs: 存储特定的扩展参数（如本地存储的 try_reflink）
         :return: 实现报告的复制成功标记
         """
         pass
@@ -388,6 +395,16 @@ class StorageBase(metaclass=ABCMeta):
         :return: 链接创建成功标记；不支持的实现可不执行并返回 None
         """
         pass
+
+    def reflink(self, fileitem: _SchemaFileItem, target_file: Path) -> bool:
+        """
+        在支持引用链接的存储中创建目标文件。
+
+        :param fileitem: 源文件项
+        :param target_file: 完整目标文件路径
+        :return: 引用链接创建成功标记；不支持的实现返回 False
+        """
+        return False
 
     @abstractmethod
     def usage(self) -> Optional[_SchemaStorageUsage]:
