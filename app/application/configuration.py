@@ -374,6 +374,7 @@ class ChainRuntimeConfig:
     :param data_cleanup_outbox_completed_days: Outbox 已完成记录保留天数，0为不清理
     :param data_cleanup_outbox_dead_days: Outbox 死信记录保留天数，0为不清理
     :param download_subtitle: 下载站点字幕
+    :param scrap_season_image_to_root: 季图片是否额外写入剧集根目录；默认开启以兼容已有媒体库
     :param lyrics_batch_timeout: 单次音乐刮削批次用于在线歌词查询的总预算（秒）
     :param music_metadata_to_simplified: 是否将识别到的音乐标题、艺术家、专辑等标准元数据转换为简体中文
     :param music_lyrics_to_simplified: 是否将写入 LRC/TXT 的歌词正文转为简体中文；保留时间轴、LRC 标签和来源 Lyricsfile
@@ -429,6 +430,7 @@ class ChainRuntimeConfig:
     :param wallpaper_image_url: 静态壁纸地址，可使用前端可访问的本地路径或 URL
     :param customize_wallpaper_api_url: 自定义壁纸api地址
     :param security_image_suffixes: 允许的图片文件后缀格式
+    :param image_proxy_allowed_private_ranges: 图片代理允许访问的非公网 IP/CIDR
     :param cache_path: 运行缓存文件根目录
     :param global_image_cache_days: 全局图片缓存保留天数
     """
@@ -461,6 +463,7 @@ class ChainRuntimeConfig:
     data_cleanup_outbox_completed_days: Any = 0
     data_cleanup_outbox_dead_days: Any = 0
     download_subtitle: bool = True
+    scrap_season_image_to_root: bool = True
     lyrics_batch_timeout: int = 120
     music_metadata_to_simplified: bool = True
     music_lyrics_to_simplified: bool = False
@@ -516,6 +519,7 @@ class ChainRuntimeConfig:
     wallpaper_image_url: Optional[str] = None
     customize_wallpaper_api_url: Optional[str] = None
     security_image_suffixes: tuple[str, ...] = ()
+    image_proxy_allowed_private_ranges: tuple[str, ...] = ()
     cache_path: Path = Path(".")
     global_image_cache_days: int = 7
 

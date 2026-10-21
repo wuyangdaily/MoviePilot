@@ -147,6 +147,12 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 回退。已有下载记录或媒体库已有目标集时沿用补集行为，提交前重新检查当前订阅；不会开启洗版
 或写入洗版优先级。测试覆盖显式缺集列表、后页整包、不完整包和搜索期间进度变化，均隔离外部服务。
 
+全集洗版（`best_version=1`、`best_version_full=1`）的主动搜索始终使用洗版规则组，
+包括尚无下载记录或仍有缺集的订阅；未通过洗版规则的整包不会回落到普通订阅规则组。
+订阅显式指定的规则组仍优先。分集洗版中从未下载的剧集继续使用普通订阅规则。
+`tests/test_subscribe_paged_search.py` 覆盖无记录、部分及全部已下载、整季标题与显式集数包，
+验证只有符合洗版规则的完整包能够提交；没有合格候选时，不写下载事实或提升洗版优先级。
+
 种子下载重试的离线边界见 `tests/test_torrent_download_retry.py`：普通 GET 在网络失败、
 403/5xx、空响应或无法解析的响应后最多重试两次，退避为 1、2 秒。签名链接刷新、换票地址、
 首次下载确认按 HTML 表单语义读取控件，兼容单双引号、属性顺序、空 action 和提交按钮；
@@ -163,6 +169,13 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 短期签名或换票资源在下载链中屏蔽原始 enclosure，不将临时请求地址写入无效缓存。
 订阅持久化保留具体失败原因，无效种子使用 24 小时资源冷却，避免重启后每小时重复通知。
 网络异常、空响应、403/5xx 和限流仍沿用瞬时重试与流控规则，不因本次修改加入内容无效黑名单。
+下载器报告同一任务已存在且整包全部媒体文件明细已记录时，按资源指纹登记 7 天提交退避，
+使订阅不再重投同一个已持有的整包；退避只压制该资源，候选仍继续尝试同媒体的其他种子，
+订阅不会被判定完成或失败，且仅订阅来源写台账（手动补投不留冷却记录）。冷却跳过日志转述台账
+中的原因，不再把它断言成"添加下载失败"。见 `tests/test_torrent_download_retry.py` 与
+`tests/test_downloader_submission.py`。
+整包退避指纹不包含解析种子后补齐的集数，下一轮搜索仍能命中；普通失败仍按原有集数指纹隔离。
+只重复选择了已记录的部分集数、但包内仍有未记录文件时，不登记整包退避，也不把未选文件写入历史。
 
 换票资源的跨批次复用见 `tests/test_download_resource_cache.py`：种子成功解析后，
 本地 `torrents` 缓存以站点资源身份、原始换票请求和 Cookie 的摘要保存内容，命中后
@@ -301,6 +314,7 @@ def test_recognize_prefers_explicit_identity(sample_meta, monkeypatch):
 - **去重脚本验证**：`node --test .github/scripts/reuse.test.mjs` 离线覆盖成功复用及保守回退，两个检查工作流均在判定前执行。复用 job 仅持有 contents/actions/pull-requests 读取权限；没有修改分支保护设置。
 
 - **门禁**：`.github/workflows/test.yml` 在指向 `v3` 的 `pull_request` / `push` 及手动触发时，从 `uv.lock` 同步环境。宿主架构门禁分为两个并行 job，`architecture` 运行宿主依赖、运行契约、事件政策测试和基线快照，`architecture-ratchets` 运行类型、复杂度、并发、Ruff/mypy ratchet 与启动性能检查；其余测试通过 `coverage run --parallel-mode tests/run.py --exclude-architecture-gate --shard N/6` 分到 6 个 job，一次执行同时验证单测并采集覆盖率；门禁已运行的架构测试不在分片中重复执行。每个分片都有独立进程和临时 `CONFIG_DIR`，不共用 SQLite 或进程级状态，由单一报告 job 合并后检查除 `app/plugins` 外全部 `app` Python 文件的逐文件低水位。
+- **启动性能**：`scripts/startup/performance.py --check --repeat 3` 对 `app.startup.lifecycle`、`app.factory`、`app.main` 分别执行三次冷导入采样。主启动各入口的耗时上限固定为 3000ms，本次采样中位数不超过 3 秒即通过，超过则失败；历史基线的中位数与最大值仅用于诊断，不改变该上限。宿主模块数量、生命周期组件集合与顺序、线程/任务释放和隔离采样无数据库连接的契约仍按原规则检查。
 - **跨仓观察**：`.github/workflows/architecture-observe.yml` 每周或手工检出官方插件仓最新 `main`，使用 `--check-plugins` 比较公开导入、Hook 和动态 API 契约。它只上传 `official-plugin-architecture-report.json`，不会自动刷新 fixture；语义变化必须人工审查后显式执行 `--write-plugins`。
 - **静态检查**：`.github/workflows/pylint.yml` 对指向 `v3` 的 PR、推送和手工触发运行 Pylint。PR/推送改动到的 Python 文件是硬门禁；`app/` 全量扫描保留为建议性 JSON 构建工件，存量告警不会掩盖或阻塞本次增量治理。
 - **PR 本地验证**：按上文「验证范围与维护者安排」选择 contributor 默认检查或已记录的维护者安排，统一处理证据复用与失败归属；需要断点、输出顺序或测试污染诊断时使用 `--serial`。确认受影响路径与零真实出站，准确标注验证范围；本地执行安排不改变 CI 的全量验证与复用合同。

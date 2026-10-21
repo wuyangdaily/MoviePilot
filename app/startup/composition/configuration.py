@@ -276,6 +276,7 @@ def build_chain_runtime_config(settings: Settings) -> ChainRuntimeConfig:
         data_cleanup_outbox_completed_days=settings.DATA_CLEANUP_OUTBOX_COMPLETED_DAYS,
         data_cleanup_outbox_dead_days=settings.DATA_CLEANUP_OUTBOX_DEAD_DAYS,
         download_subtitle=settings.DOWNLOAD_SUBTITLE,
+        scrap_season_image_to_root=settings.SCRAP_SEASON_IMAGE_TO_ROOT,
         music_metadata_to_simplified=settings.MUSIC_METADATA_TO_SIMPLIFIED,
         music_lyrics_to_simplified=settings.MUSIC_LYRICS_TO_SIMPLIFIED,
         music_cue_enable=settings.MUSIC_CUE_ENABLE,
@@ -338,6 +339,9 @@ def build_chain_runtime_config(settings: Settings) -> ChainRuntimeConfig:
         wallpaper_image_url=settings.WALLPAPER_IMAGE_URL,
         customize_wallpaper_api_url=settings.CUSTOMIZE_WALLPAPER_API_URL,
         security_image_suffixes=tuple(settings.SECURITY_IMAGE_SUFFIXES),
+        image_proxy_allowed_private_ranges=tuple(
+            settings.IMAGE_PROXY_ALLOWED_PRIVATE_RANGES
+        ),
         cache_path=settings.CACHE_PATH,
         global_image_cache_days=settings.GLOBAL_IMAGE_CACHE_DAYS,
     )

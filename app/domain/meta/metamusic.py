@@ -239,6 +239,15 @@ _MUSIC_FORMAT_TOKEN_ALT = (
     r"DSD(?:64|128|256|512)?|DSF|DFF|SACD|FLAC|ALAC|APE|CUE|WAV|WAVE|AIFF?|PCM|"
     r"MP3|AAC|M4A|OGG|VORBIS|OPUS|WMA|WEB-?DL|WEBRip|WEB"
 )
+# Gazelle 将音质、抓轨日志、介质与年份串成斜杠尾链。只匹配完整规格尾链，
+# 避免删除作品正文中的斜杠、CD 或 Log；末尾年份仍交由解析器提取。
+_MUSIC_SLASH_SPEC_TAIL_RE = re.compile(
+    rf"\s+(?:{_MUSIC_FORMAT_TOKEN_ALT})"
+    rf"(?:\s*/\s*(?:{_MUSIC_FORMAT_TOKEN_ALT}|lossless|Log(?:\s*\(\d{{1,3}}%\))?|"
+    r"CD|Vinyl|分[轨軌]|整[轨軌]|原抓|自抓|自扫|自掃))+"
+    r"(?:\s*/\s*(?P<year>(?:19|20)\d{2}))?\s*$",
+    re.IGNORECASE,
+)
 _MUSIC_VIDEO_TOKEN_ALT = (
     r"1080[pi]|720p|2160[pi]|480[pi]|4k|8k|uhd|"
     r"bluray|blu-ray|bdrip|uhd\s*bd|hddvd|hdvd|hdtv|webrip|remux|"
@@ -457,6 +466,11 @@ _MUSIC_NUMBER_ONLY_RE = re.compile(
 # 碟片目录名：CD1、Disc 2、Disk01
 _MUSIC_DISC_DIR_RE = re.compile(
     r"^\s*(?:cd|disc|disk)\s*(?P<num>\d{1,2})\s*$",
+    re.IGNORECASE,
+)
+# 碟号后缀在目录名末尾的碟片目录：陈奕迅 - 十年经典 CD1、专辑名 Disc 2
+_MUSIC_DISC_DIR_SUFFIX_RE = re.compile(
+    r"^(?:.*[\s\-–—_.,、/\\])?(?:cd|disc|disk)\s*(?P<num>\d{1,2})\s*$",
     re.IGNORECASE,
 )
 # 目录名中的年份：(2004)、[2004]
@@ -1474,9 +1488,14 @@ class MetaMusic(MetaBase):
         为两种解析引擎统一清理有格式证据的发行尾标与音频文件曲序。
 
         点分发行类型只在音频规格前生效；版本括号保留语义，介质和目录编号
-        不进入检索。文件曲序先于艺人拆分，避免 ``01. Artist`` 成为艺人名。
+        不进入检索。斜杠规格尾链整段剥离并保留年份，正文中的斜杠仍保留。
+        文件曲序先于艺人拆分，避免 ``01. Artist`` 成为艺人名。
+
+        :param value: 原始音乐资源标题或文件名
+        :return: 两种引擎共用的解析文本及待恢复的编号文件曲名
         """
         text, file_title = self._prepare_filename_input(value)
+        text = _MUSIC_SLASH_SPEC_TAIL_RE.sub(r" \g<year>", text)
         text = _MUSIC_EDITION_BRACKET_RE.sub(r"(\1)", text)
         text = _MUSIC_CATALOG_SPEC_RE.sub("", text)
         if re.search(r"(?:19|20)\d{2}", text) and len(_SCENE_DOT_RE.findall(value)) >= 3:
@@ -2160,6 +2179,14 @@ class MetaMusic(MetaBase):
         match = _MUSIC_DISC_DIR_RE.match(str(name or "").strip())
         return int(match.group("num")) if match and int(match.group("num")) > 0 else None
 
+    @classmethod
+    def parse_disc_dir_suffix(cls, name: str) -> Optional[int]:
+        """
+        识别把碟号后缀在目录名末尾的碟片目录并返回碟号，如 `陈奕迅 - 十年经典 CD1`。
+        """
+        match = _MUSIC_DISC_DIR_SUFFIX_RE.match(str(name or "").strip())
+        return int(match.group("num")) if match and int(match.group("num")) > 0 else None
+
     @staticmethod
     def _normalize_album_year(value: str) -> str:
         """
@@ -2278,6 +2305,10 @@ class MetaMusic(MetaBase):
                 self.disc_number = parent_disc
                 self.field_sources["disc_number"] = "directory"
             album_dir = parent.parent
+        elif self.disc_number is None and (suffix_disc := self.parse_disc_dir_suffix(parent.name)) is not None:
+            # 碟号写进专辑目录名末尾时只补碟号，该目录仍是专辑目录，不能上移专辑根。
+            self.disc_number = suffix_disc
+            self.field_sources["disc_number"] = "directory"
         dir_info = self.parse_album_dir(album_dir.name)
         if dir_info:
             # 文件已明确歌手时，纯专辑名目录也可补足检索线索；通用监控根目录仍须排除。

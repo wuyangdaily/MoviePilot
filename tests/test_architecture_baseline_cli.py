@@ -854,7 +854,7 @@ def test_performance_check_is_read_only(tmp_path: Path, monkeypatch, capsys):
 
     assert output.read_bytes() == content_before
     output_text = capsys.readouterr().out
-    assert "启动性能采样：app.factory 中位数 90.0ms / 预算 690.0ms" in output_text
+    assert "启动性能采样：app.factory 中位数 90.0ms / 预算 3000.0ms" in output_text
     assert "检查通过" in output_text
 
 
@@ -897,19 +897,30 @@ def test_performance_check_ignores_environment_provenance_drift():
     assert startup_performance.check_baseline(expected, actual) == []
 
 
-def test_performance_check_keeps_hosted_runner_jitter_margin():
+@pytest.mark.parametrize("target", startup_performance.IMPORT_TARGETS)
+@pytest.mark.parametrize(
+    "baseline_median_ms",
+    (90.0, 1000.0, 1000.001, 1122.382, 2000.001, 3000.0, 5000.0),
+)
+def test_performance_check_uses_fixed_three_second_limit(
+    target: str, baseline_median_ms: float,
+) -> None:
     """
-    跨平台托管 runner 可使用 15% 抖动带，但超过最终预算仍必须失败。
+    各入口固定三秒上限，等于上限通过，超过失败，历史中位数与最大值不改变预算。
     """
     expected = _performance_sample()
-    within_margin = _performance_sample()
-    within_margin["targets"]["app.factory"]["median_ms"] = 690.0
-    above_margin = _performance_sample()
-    above_margin["targets"]["app.factory"]["median_ms"] = 690.001
+    expected_target = expected["targets"].pop("app.factory")
+    expected_target["median_ms"] = baseline_median_ms
+    expected_target["max_ms"] = baseline_median_ms + 5000.0
+    expected["targets"][target] = expected_target
+    within_limit = json.loads(json.dumps(expected))
+    within_limit["targets"][target]["median_ms"] = 3000.0
+    above_limit = json.loads(json.dumps(expected))
+    above_limit["targets"][target]["median_ms"] = 3000.001
 
-    assert startup_performance.check_baseline(expected, within_margin) == []
-    assert startup_performance.check_baseline(expected, above_margin) == [
-        "app.factory 冷导入中位数 690.001ms 超过预算 690.0ms"
+    assert startup_performance.check_baseline(expected, within_limit) == []
+    assert startup_performance.check_baseline(expected, above_limit) == [
+        f"{target} 冷导入中位数 3000.001ms 超过预算 3000.0ms"
     ]
 
 
