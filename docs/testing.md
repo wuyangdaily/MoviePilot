@@ -62,6 +62,12 @@ focused 测试验证，不要求启动产品全套测试。
 提交失败与取消后的重试，以及关闭超时保留资源。`tests/test_telegram.py` 覆盖海报失败后的文本
 兜底、会话/话题/按钮保留、429 不追加请求，以及发送失败不能被 outbox 当作成功确认。
 
+`tests/test_db_error_diagnostics.py` 在临时 SQLite 的同步及异步连接池中注入
+`SQLITE_IOERR_SHORT_READ`：失败事务保留原始异常、不自动重放写入，后续独立事务
+使用新连接恢复；锁争用和约束错误不触发额外的连接失效。
+`tests/test_event_runtime_components.py` 验证 `SystemError` 处理器失败时只记日志，
+不再调用通知回调或派生错误广播。此回归不模拟真实磁盘故障，也不保证持续 I/O 故障时数据库可用。
+
 ## 隔离模型（`tests/conftest.py`）
 
 收集任何测试模块、`import app.*` **之前**，conftest 完成两件事：
@@ -140,6 +146,10 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 `tests/test_download_category.py` 从真实下载链经过 qBittorrent 模块和客户端，在 SDK 边界检查
 音乐缺分类时使用“音乐”、已有分类优先，以及自动管理开关和指定路径的传递。
 覆盖豆瓣音乐、MusicBrainz、无显式身份、专辑、单曲与艺术家合集，且下载器分类兜底不回写媒体信息。
+
+`tests/test_music_bilingual_matching.py` 在 Python/Rust 解析、同步/异步/流式搜索和订阅复核中，
+验证双语作品名及艺人署名只有在括号两侧均属于同一实体的可信名称时才匹配；
+未知别名、副标题、不同录音版本及歌曲所属专辑继续保留各自的身份边界。
 
 普通电视剧首次下载的整包优先回归见 `tests/test_subscribe_paged_search.py`：订阅没有下载记录，
 且最新媒体库缺失全部目标集时，先收集所选搜索范围内的候选再尝试完整包；单页策略仍只查每个

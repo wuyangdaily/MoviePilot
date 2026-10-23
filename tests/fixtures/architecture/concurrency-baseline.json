@@ -640,6 +640,13 @@
     },
     "target": "asyncio.to_thread"
   },
+  "app/startup/composition/cliagent.py:app.runtime.execution.run_in_threadpool_to_completion": {
+    "owners": {
+      "_close_cli_extensions": 3,
+      "run_cli_agent_request": 2
+    },
+    "target": "app.runtime.execution.run_in_threadpool_to_completion"
+  },
   "app/startup/composition/network.py:asyncio.to_thread": {
     "owners": {
       "_NetworkTestTransportAdapter.websocket": 1
@@ -659,6 +666,12 @@
       "_FileLogAdapter.collect": 1
     },
     "target": "asyncio.to_thread"
+  },
+  "app/startup/initializers/agent.py:app.runtime.execution.run_in_threadpool_to_completion": {
+    "owners": {
+      "AgentInitializer._bind_runtime_data": 1
+    },
+    "target": "app.runtime.execution.run_in_threadpool_to_completion"
   },
   "app/startup/initializers/modules.py:app.runtime.execution.run_in_threadpool_to_completion": {
     "owners": {

@@ -11,7 +11,7 @@ import dateutil.parser
 from lxml import etree
 
 from app.application.configuration import get_chain_runtime_config_snapshot
-from app.foundation.url import UrlUtils
+from app.foundation.url import UrlUtils, mask_url_credentials
 from app.runtime.log import logger
 
 
@@ -435,15 +435,15 @@ class RssHelper:
                 headers=headers,
             )
             if not ret:
-                logger.error(f"获取RSS失败：请求返回空值，URL: {url}")
+                logger.error(f"获取RSS失败：请求返回空值，URL: {mask_url_credentials(url)}")
                 return False
         except Exception as err:
-            logger.error(f"获取RSS失败：{str(err)} - {traceback.format_exc()}")
+            logger.error(mask_url_credentials(f"获取RSS失败：{str(err)} - {traceback.format_exc()}"))
             return False
 
         if ret:
             if ret.status_code != 200:
-                logger.error(f"RSS请求失败，状态码: {ret.status_code}, URL: {url}")
+                logger.error(f"RSS请求失败，状态码: {ret.status_code}, URL: {mask_url_credentials(url)}")
                 return False
             ret_xml = None
             root = None
@@ -453,6 +453,14 @@ class RssHelper:
                 if raw_data and len(raw_data) > self.MAX_RSS_SIZE:
                     logger.warning(f"RSS文件过大: {len(raw_data) / 1024 / 1024:.1f}MB，跳过解析")
                     return False
+
+                expired_messages = {
+                    "RSS 链接已过期, 您需要获得一个新的!",
+                    "RSS Link has expired, You need to get a new one!",
+                    "RSS Link has expired, You need to get new!",
+                }
+                if ret.text.strip() in expired_messages:
+                    return None
 
                 if raw_data:
                     ret_xml = http_port.decode_xml(
@@ -601,14 +609,6 @@ class RssHelper:
 
             except Exception as e2:
                 logger.error(f"解析RSS失败：{str(e2)} - {traceback.format_exc()}")
-                # RSS过期检查
-                _rss_expired_msg = [
-                    "RSS 链接已过期, 您需要获得一个新的!",
-                    "RSS Link has expired, You need to get a new one!",
-                    "RSS Link has expired, You need to get new!"
-                ]
-                if ret_xml in _rss_expired_msg:
-                    return None
                 return False
             finally:
                 if root is not None:

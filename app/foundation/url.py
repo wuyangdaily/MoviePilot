@@ -9,6 +9,19 @@ from typing import Iterable, Mapping, Optional, Tuple, Union
 from urllib import parse
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
+REDACTED_URL_CREDENTIAL = "<REDACTED>"
+# 站点 RSS 与开放接口常把凭据放在查询串里，参数名保留用于定位，只遮盖参数值。
+URL_QUERY_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)([?&](?:[a-z0-9]+[-_.])*(?:"
+    r"passkey|rsskey|authkey|auth_token|access_token|access_key|refresh_token|id_token"
+    r"|api_key|apikey|secret_key|secret|password|passwd|token|cookie|sign|pwd|auth|uid|pid|key"
+    r"))(\s*=\s*)[^\s&#]*"
+)
+# 主机端口与 userinfo 口令都由冒号引导，因此只在 authority 内以最后一个 @ 为边界遮盖口令。
+URL_USERINFO_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)([a-z][a-z0-9+.\-]*://)([^\s/?#@:]*?:)(?=[^\s/?#]*@)[^\s/?#]*(?=@)"
+)
+
 
 class UrlUtils:
     """
@@ -43,6 +56,25 @@ class UrlUtils:
         ):
             return None
         return normalized_url
+
+    @staticmethod
+    def same_origin(source: object, destination: object) -> bool:
+        """
+        比较HTTP来源的协议、主机及有效端口；无效地址不能接收来源凭据。
+
+        :param source: 认证凭据所属的绝对HTTP地址
+        :param destination: 准备请求的绝对HTTP地址
+        :return: 两地址来源完全一致且均有效时为True
+        """
+        source_url, destination_url = UrlUtils.normalize_http_url(source), UrlUtils.normalize_http_url(destination)
+        if source_url is None or destination_url is None:
+            return False
+        first, second = urlparse(source_url), urlparse(destination_url)
+        if first.username or first.password or second.username or second.password:
+            return False
+        return (first.scheme, first.hostname, first.port if first.port is not None else (443 if first.scheme == "https" else 80)) == (
+            second.scheme, second.hostname, second.port if second.port is not None else (443 if second.scheme == "https" else 80)
+        )
 
     @staticmethod
     def standardize_base_url(host: str) -> str:
@@ -227,6 +259,28 @@ def base_url(url: str) -> str:
         return ""
     scheme, netloc = split_netloc(url)
     return f"{scheme}://{netloc}"
+
+
+def mask_url_credentials(url: str) -> str:
+    """
+    遮盖文本中 URL 形态的凭据，保留其余内容用于定位。
+
+    只按查询串凭据参数和 userinfo 口令两种 URL 语法做遮盖，不解析、不重写地址；
+    主机、端口、路径、分页等非凭据参数保持原样，重复调用结果不变。
+
+    :param url: 需要脱敏的 URL，或包含 URL 的日志与异常文本
+    :return: 凭据值替换为占位符后的文本；输入为空时原样返回
+    """
+    if not url:
+        return url
+    masked = URL_QUERY_CREDENTIAL_PATTERN.sub(
+        rf"\1\2{REDACTED_URL_CREDENTIAL}",
+        url,
+    )
+    return URL_USERINFO_CREDENTIAL_PATTERN.sub(
+        rf"\1\2{REDACTED_URL_CREDENTIAL}",
+        masked,
+    )
 
 
 def parse_address(
