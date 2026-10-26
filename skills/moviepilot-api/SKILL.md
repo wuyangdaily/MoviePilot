@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 63
+version: 68
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -102,6 +102,11 @@ including for channel administrators. Creation belongs to that user; ordinary
 users may update or delete only their own subscriptions. An unbound or inactive
 channel user must bind an active account before retrying, not switch to an
 administrator identity.
+
+`subscription.list` uses the current user identity and subscription ownership filtering.
+The separate global subscription integration endpoint requires a valid API_TOKEN
+and administrator identity. It is outside this skill's allowed operations and must
+never be used to bypass user scope.
 
 For QQ, either `qq_userid` or `qq_openid` may match the current channel ID; for
 Feishu, either `feishu_userid` or `feishu_openid` may match. A single matching
@@ -226,6 +231,13 @@ frontmatter allowlist, and the matching gateway contract together.
 
 ## API Surface Scope
 
+System widget endpoints under `/api/v1/widget/*` are outside this skill and the Agent tool catalog.
+Context, registration, and owner revocation use the existing main login. Snapshot reads and self
+revocation use a separate, expiring, read-only Bearer; never use it as an ordinary API/MCP login
+credential, or enable, rotate, or export widget grants on a user's behalf. Reading context must not
+issue or rotate credentials. See `docs/widgets.md` for the protocol and user scope. System extensions
+must not hold the main login token.
+
 For installed plugins with a bound source, `plugin.market` only lists an update
 when that repository has a newer version. A higher version in another repository
 does not trigger `has_update`. Use `plugin.source.options` to inspect alternative
@@ -290,6 +302,12 @@ Call the gateway with this shape:
 ```
 
 ### Common read and download contracts
+
+`search.recommend` with `check_only=true` reads current status without loading search results.
+Disabled recommendations return `disabled` immediately. `force=true` takes precedence over
+the read-only flag and loads candidates to start a new task.
+The browser endpoints `/media/status` and `/subscribe/calendar` are outside the Agent
+operation catalog; do not invent gateway calls for them.
 
 Select the operation for the task first, then send only fields declared by that operation. Common verification contracts are:
 

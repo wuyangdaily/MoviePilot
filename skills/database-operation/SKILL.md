@@ -1,6 +1,6 @@
 ---
 name: database-operation
-version: 14
+version: 16
 description: >-
   Use this skill when you need to inspect, query, maintain, or carefully modify
   the MoviePilot database. This skill uses the bundled scripts/mp-db.py helper,
@@ -66,8 +66,10 @@ System settings have two managed sources and should not normally be edited here:
   configuration-change events.
 
 Use direct SQL against `systemconfig` only for an explicitly authorized repair
-when the managed API cannot complete the operation. Inspect the exact row first,
-avoid broad writes, and verify the managed API can read the repaired value.
+when the managed API cannot complete the operation. The script blocks any
+statement that references `systemconfig` until you pass `--show-secrets`, so
+inspect the exact row first, avoid broad writes, and verify the managed API can
+read the repaired value.
 
 ## Commands
 
@@ -103,6 +105,23 @@ python scripts/mp-db.py write "UPDATE subscribe SET state = 'S' WHERE id = 123"
 
 `query --write` is also supported for compatibility, but prefer the `write` subcommand for `INSERT`, `UPDATE`, `DELETE`, and schema changes.
 
+SQLite also checks the actual table accesses while executing each statement,
+including single-quoted table names and reads through views. The temporary
+authorizer is removed when that statement finishes. PostgreSQL retains the
+identifier check described below.
+
+Statements that reference `systemconfig` are rejected until you add
+`--show-secrets`, in read and write mode alike:
+
+```bash
+python scripts/mp-db.py query "SELECT key, value FROM systemconfig WHERE key = 'TMDB_API_KEY'" --show-secrets
+```
+
+The gate is per table, not per column, so even a count or key listing over
+`systemconfig` needs the flag. Read normal settings through
+`moviepilot-api` `config.system.get` instead, which redacts secrets for you,
+and pass the flag only for an explicitly authorized repair.
+
 ## Workflow
 
 1. Prefer existing MoviePilot tools or APIs for normal product workflows.
@@ -121,14 +140,22 @@ python scripts/mp-db.py write "UPDATE subscribe SET state = 'S' WHERE id = 123"
   do not change a query into a write or a multi-statement request. Unclosed
   lexical structures remain invalid.
 - Plain `SELECT` queries get a default `LIMIT 100` if no limit is present.
-- Query results are returned exactly as stored. The agent may use sensitive values internally when needed, but must not echo secrets in the final user-facing response unless the user explicitly asks to inspect that value.
+- `systemconfig` aggregates every instance-level API key, cookie and password,
+  so it stays unreadable and unwritable until you pass `--show-secrets`. Quoted
+  identifiers and schema-qualified names are recognized, so aliasing the table
+  does not avoid the gate.
+- Other tables are not gated. `site` and plugin data still hold per-site
+  credentials, so keep the projection narrow instead of selecting whole rows.
+- Results are returned exactly as stored. The agent may use sensitive values
+  internally when needed, but must not echo secrets in the final user-facing
+  response unless the user explicitly asks to inspect that value.
 
 ## Safety Rules
 
 1. Confirm before destructive or broad write operations when the user has not already clearly authorized the exact change.
 2. Suggest a backup before destructive operations such as `DELETE`, `DROP`, or `TRUNCATE`.
 3. Never run `UPDATE` or `DELETE` without a `WHERE` clause unless the user explicitly intends to affect all rows.
-4. Raw secrets, cookies, passkeys, hashed passwords, OTP secrets, API keys, or tokens may appear in tool output. Use them only for the requested operation and avoid repeating them in the final response unless explicitly requested.
+4. Raw secrets, cookies, passkeys, hashed passwords, OTP secrets, API keys, or tokens may appear in tool output. Use them only for the requested operation and avoid repeating them in the final response unless explicitly requested. Never add `--show-secrets` to widen a search for a value another surface can already report.
 5. Keep output small. Summarize large results instead of dumping them.
 
 ## Core Tables
@@ -193,7 +220,7 @@ python scripts/mp-db.py write "UPDATE subscribe SET state = 'S' WHERE id = 123"
 - Purpose: Stores inbound and outbound messages, channels, content, attachments, users, and timestamps.
 - Useful queries: Paging notification history, distinguishing direction, or tracing duplicates by source.
 - Write boundary: Written by messaging and notification services; clean it through the message API or retention job.
-- Columns: `id`, `channel`, `source`, `mtype`, `title`, `text`, `image`, `link`, `userid`, `reg_time`, `action`, `note`
+- Columns: `id`, `channel`, `source`, `mtype`, `title`, `text`, `image`, `poster`, `link`, `userid`, `reg_time`, `action`, `note`
 
 ### `outboxmessage`
 - Purpose: Stores externally visible side-effect intents committed atomically with business transactions.
@@ -332,13 +359,19 @@ python scripts/mp-db.py write "UPDATE subscribe SET state = 'S' WHERE id = 123"
 - Purpose: Stores user accounts, password hashes, administrator state, OTP, permissions, and preferences.
 - Useful queries: Authorized diagnostics of account state, permissions, or authentication configuration.
 - Write boundary: Security-sensitive; manage through user, permission, password, and two-factor APIs.
-- Columns: `id`, `name`, `email`, `hashed_password`, `is_active`, `is_superuser`, `avatar`, `is_otp`, `otp_secret`, `permissions`, `settings`
+- Columns: `id`, `name`, `email`, `hashed_password`, `is_active`, `is_superuser`, `avatar`, `is_otp`, `otp_secret`, `permissions`, `settings`, `notification_identity`
 
 ### `userconfig`
 - Purpose: Stores per-user JSON configuration isolated by username and key.
 - Useful queries: Inspecting UI preferences, message clear cursors, or other personalized state.
 - Write boundary: Modify through the owning user or messaging API to preserve key semantics.
 - Columns: `id`, `username`, `key`, `value`
+
+### `widgetregistration`
+- Purpose: Stores expiring, read-only widget grants per user and installation; only a digest of the dedicated Bearer is stored, never the raw secret or the main login token.
+- Useful queries: Authorized diagnostics of one user's installation ownership, expiry, or revoked widget access; never disclose credential digests or inventory other users' installations.
+- Write boundary: Security-sensitive; register, rotate, or revoke only through the authenticated widget API. Never insert grants, change ownership or expiry, or copy a digest into a login credential.
+- Columns: `id`, `registration_id`, `installation_id`, `user_id`, `owner`, `secret_digest`, `expires_at`
 
 ### `workflow`
 - Purpose: Stores workflow definitions, triggers, action graphs, execution context, and runtime state.

@@ -50,6 +50,7 @@ PACKAGE_BY_VERSION = {
     "legacy": ("package.json", "plugins"),
     "v1": ("package.json", "plugins"),
     "v2": ("package.v2.json", "plugins.v2"),
+    "v3": ("package.v3.json", "plugins.v3"),
 }
 TOKEN_ENV_NAMES = ("MOVIEPILOT_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
 DEFAULT_EXCLUDES = (
@@ -167,6 +168,8 @@ class Layout:
         """
         返回布局版本标识。
         """
+        if self.plugin_root == "plugins.v3":
+            return "v3"
         if self.plugin_root == "plugins.v2":
             return "v2"
         return "legacy"
@@ -188,7 +191,7 @@ class GitHubError(RuntimeError):
 
 class GitHubClient:
     """
-    基于 GitHub Contents API 的轻量客户端。
+    基于 GitHub Contents / Git Data API 的轻量客户端。
     """
 
     def __init__(
@@ -276,18 +279,19 @@ class GitHubClient:
         except json.JSONDecodeError:
             return raw.decode("utf-8", errors="replace")
 
-    def get_file(self, path: str) -> Optional[FileState]:
+    def get_file(self, path: str, ref: Optional[str] = None) -> Optional[FileState]:
         """
         读取远端单个文件，文件不存在时返回 None。
 
         :param path: 仓库内 POSIX 路径
+        :param ref: 固定读取的提交；未指定时读取目标分支
         :return: 文件状态或 None
         """
         encoded_path = quote_path(path)
         try:
             data = self.request(
                 "GET",
-                f"/repos/{self.repo}/contents/{encoded_path}?ref={quote(self.branch)}",
+                f"/repos/{self.repo}/contents/{encoded_path}?ref={quote(ref or self.branch)}",
             )
         except GitHubError as err:
             if err.status == 404:
@@ -299,17 +303,18 @@ class GitHubClient:
         content = base64.b64decode(raw_content.encode("utf-8"), validate=False)
         return FileState(path=path, content=content, sha=data.get("sha"))
 
-    def list_files(self, prefix: str) -> dict[str, FileState]:
+    def list_files(self, prefix: str, ref: Optional[str] = None) -> dict[str, FileState]:
         """
         递归列出远端路径下的全部文件。
 
         :param prefix: 仓库内目录路径
+        :param ref: 固定读取的提交；递归列表和文件内容共用此引用
         :return: 以仓库路径为键的远端文件状态
         """
         normalized_prefix = normalize_remote_path(prefix)
         if not normalized_prefix:
             return {}
-        tree = self.get_tree()
+        tree = self.get_tree(ref=ref)
         files: dict[str, FileState] = {}
         prefix_with_slash = f"{normalized_prefix}/"
         for item in tree:
@@ -319,22 +324,25 @@ class GitHubClient:
             if path == normalized_prefix or path.startswith(prefix_with_slash):
                 files[path] = FileState(path=path, content=b"", sha=item.get("sha"))
         for path in list(files):
-            file_state = self.get_file(path)
+            file_state = self.get_file(path, ref=ref)
             if file_state is not None:
                 files[path] = file_state
         return files
 
-    def get_tree(self) -> list[dict[str, Any]]:
+    def get_tree(self, ref: Optional[str] = None) -> list[dict[str, Any]]:
         """
         读取目标分支的递归 Git tree。
 
+        :param ref: 固定读取的提交；未指定时查询目标分支
         :return: Git tree 条目列表
         """
-        branch_data = self.request(
-            "GET",
-            f"/repos/{self.repo}/branches/{quote(self.branch)}",
-        )
-        commit_sha = branch_data.get("commit", {}).get("sha")
+        commit_sha = ref
+        if not commit_sha:
+            branch_data = self.request(
+                "GET",
+                f"/repos/{self.repo}/branches/{quote(self.branch)}",
+            )
+            commit_sha = branch_data.get("commit", {}).get("sha")
         if not commit_sha:
             raise GitHubError(0, f"无法读取分支 {self.branch} 的提交 SHA")
         tree_data = self.request(
@@ -346,48 +354,159 @@ class GitHubClient:
             return []
         return tree
 
-    def put_file(self, path: str, content: bytes, message: str, sha: Optional[str]) -> Any:
+    def create_blob(self, content: bytes) -> str:
         """
-        创建或更新远端文件。
+        上传一个 Git blob。
 
-        :param path: 仓库内 POSIX 路径
         :param content: 文件内容
-        :param message: 提交消息
-        :param sha: 远端现有文件 SHA，创建时为 None
-        :return: GitHub API 响应
+        :return: blob SHA
         """
-        payload: dict[str, Any] = {
-            "message": message,
-            "content": base64.b64encode(content).decode("ascii"),
-            "branch": self.branch,
-        }
-        if sha:
-            payload["sha"] = sha
-        return self.request(
-            "PUT",
-            f"/repos/{self.repo}/contents/{quote_path(path)}",
+        data = self.request(
+            "POST",
+            f"/repos/{self.repo}/git/blobs",
+            payload={
+                "content": base64.b64encode(content).decode("ascii"),
+                "encoding": "base64",
+            },
+        )
+        sha = data.get("sha") if isinstance(data, dict) else None
+        if not sha:
+            raise GitHubError(0, "创建 Git blob 失败：响应缺少 sha")
+        return str(sha)
+
+    def create_tree(self, entries: list[dict[str, Any]], base_tree: Optional[str] = None) -> str:
+        """
+        基于已有树创建一棵新树。
+
+        :param entries: 树条目；删除文件时 sha 传 None
+        :param base_tree: 基线树 SHA；空仓库传 None
+        :return: 新树 SHA
+        """
+        payload: dict[str, Any] = {"tree": entries}
+        if base_tree:
+            payload["base_tree"] = base_tree
+        data = self.request(
+            "POST",
+            f"/repos/{self.repo}/git/trees",
             payload=payload,
         )
+        sha = data.get("sha") if isinstance(data, dict) else None
+        if not sha:
+            raise GitHubError(0, "创建 Git tree 失败：响应缺少 sha")
+        return str(sha)
 
-    def delete_file(self, path: str, message: str, sha: str) -> Any:
+    def create_commit(self, message: str, tree_sha: str, parents: list[str]) -> str:
         """
-        删除远端文件。
+        创建一个提交对象。
 
-        :param path: 仓库内 POSIX 路径
-        :param message: 提交消息
-        :param sha: 远端文件 SHA
+        :param message: 提交说明
+        :param tree_sha: 提交指向的树
+        :param parents: 父提交；空仓库传空列表
+        :return: 提交 SHA
+        """
+        data = self.request(
+            "POST",
+            f"/repos/{self.repo}/git/commits",
+            payload={"message": message, "tree": tree_sha, "parents": parents},
+        )
+        sha = data.get("sha") if isinstance(data, dict) else None
+        if not sha:
+            raise GitHubError(0, "创建 Git commit 失败：响应缺少 sha")
+        return str(sha)
+
+    def get_branch_commit(self) -> Optional[dict[str, Any]]:
+        """
+        读取目标分支当前提交。
+
+        :return: 分支接口返回的 commit 对象；空仓库或分支不存在时返回 None
+        """
+        try:
+            data = self.request("GET", f"/repos/{self.repo}/branches/{quote(self.branch)}")
+        except GitHubError as error:
+            if error.status in (404, 409):
+                return None
+            raise
+        commit = data.get("commit") if isinstance(data, dict) else None
+        if not isinstance(commit, dict) or not commit.get("sha"):
+            return None
+        return commit
+
+    def update_branch(self, commit_sha: str) -> Any:
+        """
+        把分支引用指向新提交，且禁止强推。
+
+        :param commit_sha: 新提交 SHA
         :return: GitHub API 响应
         """
-        payload = {
-            "message": message,
-            "sha": sha,
-            "branch": self.branch,
-        }
         return self.request(
-            "DELETE",
-            f"/repos/{self.repo}/contents/{quote_path(path)}",
-            payload=payload,
+            "PATCH",
+            f"/repos/{self.repo}/git/refs/heads/{urllib.parse.quote(self.branch, safe='/')}",
+            payload={"sha": commit_sha, "force": False},
         )
+
+    def create_branch_ref(self, commit_sha: str) -> Any:
+        """
+        在空仓库中创建目标分支引用。
+
+        :param commit_sha: 新提交 SHA
+        :return: GitHub API 响应
+        """
+        return self.request(
+            "POST",
+            f"/repos/{self.repo}/git/refs",
+            payload={"ref": f"refs/heads/{self.branch}", "sha": commit_sha},
+        )
+
+    def commit_files(
+        self,
+        files: dict[str, bytes],
+        deletes: list[str],
+        message: str,
+        base_commit: Optional[dict[str, Any]],
+    ) -> Optional[str]:
+        """
+        用 Git Data API 把多个文件的变更合并成一次提交。
+
+        Contents API 每个文件一次 PUT 就是一次提交，会让 CI 只看到最后一次
+        推送的文件差异；这里改为 blob → tree → commit → 移动分支引用，
+        无论改多少文件都只产生一个提交。
+
+        :param files: 仓库路径到文件内容的映射
+        :param deletes: 需要删除的仓库路径
+        :param message: 提交说明
+        :param base_commit: 文件读取前固定的基线提交；None 表示基线为空仓库
+        :return: 新提交 SHA；没有任何变更时返回 None
+        """
+        if not files and not deletes:
+            return None
+        head = base_commit
+        base_tree = None
+        parents: list[str] = []
+        if head:
+            tree = head.get("commit", {}).get("tree") if isinstance(head.get("commit"), dict) else None
+            base_tree = tree.get("sha") if isinstance(tree, dict) else None
+            parents = [str(head["sha"])]
+        entries: list[dict[str, Any]] = []
+        for path, content in files.items():
+            entries.append(
+                {
+                    "path": path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": self.create_blob(content),
+                }
+            )
+        for path in deletes:
+            entries.append(
+                {"path": path, "mode": "100644", "type": "blob", "sha": None}
+            )
+        tree_sha = self.create_tree(entries, base_tree)
+        commit_sha = self.create_commit(message, tree_sha, parents)
+        if head:
+            self.update_branch(commit_sha)
+        else:
+            self.create_branch_ref(commit_sha)
+        return commit_sha
 
     def repo_exists(self) -> bool:
         """
@@ -714,7 +833,7 @@ def resolve_layout(package_version: str, local_repo: Path, plugin_id: str) -> La
     """
     根据参数和本地文件推断插件仓库布局。
 
-    :param package_version: v2、legacy 或 auto
+    :param package_version: v3、v2、legacy 或 auto
     :param local_repo: 本地仓库目录
     :param plugin_id: 插件 ID
     :return: 布局描述
@@ -723,11 +842,22 @@ def resolve_layout(package_version: str, local_repo: Path, plugin_id: str) -> La
     if normalized in PACKAGE_BY_VERSION:
         package_file, plugin_root = PACKAGE_BY_VERSION[normalized]
         return Layout(package_file=package_file, plugin_root=plugin_root)
+    v3_dir = local_repo / "plugins.v3" / plugin_id.lower()
     v2_dir = local_repo / "plugins.v2" / plugin_id.lower()
     legacy_dir = local_repo / "plugins" / plugin_id.lower()
-    if (local_repo / "package.v2.json").exists() or v2_dir.exists():
+    # 先看插件实际落在哪个目录：同一仓库可能同时保留 v2 与 v3 清单，
+    # 只看清单文件会把只存在于 plugins.v2 的插件误判成 v3 布局。
+    if v3_dir.exists():
+        return Layout(package_file="package.v3.json", plugin_root="plugins.v3")
+    if v2_dir.exists():
         return Layout(package_file="package.v2.json", plugin_root="plugins.v2")
-    if (local_repo / "package.json").exists() or legacy_dir.exists():
+    if legacy_dir.exists():
+        return Layout(package_file="package.json", plugin_root="plugins")
+    if (local_repo / "package.v3.json").exists():
+        return Layout(package_file="package.v3.json", plugin_root="plugins.v3")
+    if (local_repo / "package.v2.json").exists():
+        return Layout(package_file="package.v2.json", plugin_root="plugins.v2")
+    if (local_repo / "package.json").exists():
         return Layout(package_file="package.json", plugin_root="plugins")
     return Layout(package_file="package.v2.json", plugin_root="plugins.v2")
 
@@ -990,6 +1120,7 @@ def load_remote_files_for_push(
     :return: 远端插件文件、远端 package 文件、仓库是否已存在
     """
     client: GitHubClient = context["client"]
+    context["base_commit"] = None
     repo_exists = client.repo_exists()
     if not repo_exists and not args.create_repo_if_missing:
         raise GitHubError(
@@ -998,9 +1129,15 @@ def load_remote_files_for_push(
         )
     if not repo_exists:
         return {}, None, False
+    # 清单、插件内容、删除候选与提交父树必须属于同一个不可变快照。
+    head = client.get_branch_commit()
+    context["base_commit"] = head
+    if head is None:
+        return {}, None, True
+    ref = str(head["sha"])
     return (
-        client.list_files(context["remote_prefix"]),
-        client.get_file(context["layout"].package_file),
+        client.list_files(context["remote_prefix"], ref=ref),
+        client.get_file(context["layout"].package_file, ref=ref),
         True,
     )
 
@@ -1051,6 +1188,10 @@ def push(args: argparse.Namespace) -> dict[str, Any]:
     )
     entry = read_package_entry(context["local_repo"], context["layout"], context["plugin_id"])
     remote_files, remote_package, repo_existed = load_remote_files_for_push(context, args)
+    if not repo_existed and not args.dry_run:
+        client.create_repo(private=args.private)
+        # auto_init 会创建默认分支；创建后重新固定快照，并重新读取、比较及合并全部内容。
+        remote_files, remote_package, _ = load_remote_files_for_push(context, args)
     package_content = merge_package_content(
         remote_package.content if remote_package else None,
         context["plugin_id"],
@@ -1069,31 +1210,27 @@ def push(args: argparse.Namespace) -> dict[str, Any]:
         payload["dry_run"] = True
         return payload
 
-    if not repo_existed:
-        client.create_repo(private=args.private)
     message = args.message or f"Publish {context['plugin_id']}"
     applied: dict[str, list[str]] = {"create": [], "update": [], "delete": []}
+    files_to_write: dict[str, bytes] = {}
     if package_change in {"create", "update"}:
-        client.put_file(
-            context["layout"].package_file,
-            package_content,
-            message,
-            remote_package.sha if remote_package else None,
-        )
+        files_to_write[context["layout"].package_file] = package_content
         applied[package_change].append(context["layout"].package_file)
     for path in changes.create:
-        client.put_file(path, local_files[path].content, message, None)
+        files_to_write[path] = local_files[path].content
         applied["create"].append(path)
     for path in changes.update:
-        client.put_file(path, local_files[path].content, message, remote_files[path].sha)
+        files_to_write[path] = local_files[path].content
         applied["update"].append(path)
+    delete_paths: list[str] = []
     for path in changes.delete:
-        remote_sha = remote_files[path].sha
-        if remote_sha:
-            client.delete_file(path, message, remote_sha)
+        if remote_files[path].sha:
+            delete_paths.append(path)
             applied["delete"].append(path)
+    commit_sha = client.commit_files(files_to_write, delete_paths, message, context["base_commit"])
     payload["applied"] = applied
-    payload["message"] = "插件已推送到 GitHub 仓库。"
+    payload["commit_sha"] = commit_sha
+    payload["message"] = "插件已以单个提交推送到 GitHub 仓库。"
     return payload
 
 
@@ -1328,7 +1465,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", required=True, help="GitHub 仓库，格式 owner/repo")
     parser.add_argument("--plugin-id", default="", help="插件类名 ID")
     parser.add_argument("--local-repo", default="", help="本地插件仓库目录")
-    parser.add_argument("--package-version", default="auto", help="auto、v2 或 legacy")
+    parser.add_argument("--package-version", default="auto", help="auto、v3、v2 或 legacy")
     parser.add_argument("--branch", default=DEFAULT_BRANCH, help="目标分支")
     parser.add_argument("--token", default="", help="GitHub token，默认读取配置或环境变量")
     parser.add_argument("--message", default="", help="提交消息")

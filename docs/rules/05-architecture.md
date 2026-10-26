@@ -81,6 +81,7 @@ to make the directory tree look symmetrical.
 | `app/application/site/` | Configured site catalog, authentication level and index-resource capability; the generated extension and its data bundle stay together here |
 | `app/application/messaging/` | Message rendering/routing, interactions and the Agent-to-message bridge: `ingress.py` owns the single channel-to-host loopback boundary; `interaction/` owns generic interaction state plus Agent choice contracts; `channel/admin.py` owns channel administrator resolution; `router.py` unified interaction priority and callback dispatch; `site.py`/`subscribe.py`/`skill.py` per-command sessions, input parsing and views; `media.py` media interaction state while the business workflow stays in `MediaInteractionChain`; `plugin.py` plugin input capture and plugin button callbacks; `webagent/` owns WebAgent notification events and stream transport; `agent.py` owns WebAgent application orchestration, display projection, session identity/persistence coordination, temporary attachment registry and audio preparation/transcription; `message.py` notification rendering, templates and queue. Not a public SDK recommended for direct plugin use |
 | `app/application/security/` | Authentication, authorization, frozen user/auth projections, atomic user aggregate commands, per-user configuration publication, cookies, passkeys, OTP/two-factor, path/URL safety, SSRF and signing policy |
+| `app/application/security/widget.py` / `app/application/widget.py` | 小组件专用只读登记、当前账号与权限校验，以及既有有界查询的最小展示投影；`db/adapters/widget.py` 以用户锁和短事务保护轮换、名额与撤销，组合根通过 `AuthenticationRuntime.widget_scope` 注入，不创建第二套登录或业务写入 API |
 
 订阅日志仍由 `runtime/log.py` 的通用资源作用域负责路由、等级和有界滚动写入；
 `application/subscription/observability.py` 只绑定订阅身份并汇总诊断省略数量。
@@ -802,6 +803,14 @@ SMB 同存储整理由 `app.modules.filemanager.storages.smb` 持有协议调用
 修改时间可能由云盘延迟更新或缺失，不作为整理执行阶段的文件身份校验依据。
 本地文件 ID 使用设备号和 inode，验证不额外读取整文件计算哈希。
 外部 legacy transfer provider 继续遵循原有兼容合同。
+
+严格文件查询使用模块能力 `get_file_item_strict(storage, path)`。提供方不支持目标存储时返回
+`None`，调度继续寻找下一提供方；真正完成查询时返回 `FileItemQueryResult(item=...)`，
+其中 `item=None` 才能作为目标不存在的证据。存储不可用或查询失败必须抛出。
+`StorageChain.get_file_item_strict` 仅接受明确回执；旧插件的普通能力非空命中继续兼容，
+但空结果没有存储归属证明，不能用于删除历史等破坏性决策。旧插件如需声明“已确认不存在”，
+应实现新能力并返回回执；普通 `get_file_item` 的 nullable 查询合同不变。
+显式重新整理在清理旧目标前及删除失败后均使用严格查询，未知态保留历史和失败计数。
 
 SMB 目录快照不依赖祖先目录 mtime 推断后代变化，而在既有递归深度上限内逐层列举。
 存储通过 `snapshot_strict_query` 声明已实现 `get_item_strict` / `list_strict`；

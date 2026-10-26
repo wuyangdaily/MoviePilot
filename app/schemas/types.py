@@ -426,6 +426,8 @@ class SystemConfigKey(Enum):
     MediaServers = "MediaServers"
     # 消息通知配置
     Notifications = "Notifications"
+    # App 中心推送自动接入凭据，业务内部维护且不进入通知渠道配置
+    AppPushCredentials = "AppPushCredentials"
     # 通知场景开关设置
     NotificationSwitchs = "NotificationSwitchs"
     # 目录配置
@@ -607,6 +609,8 @@ class NotificationChannel(Enum):
     WebAgent = "WebAgent"
     # 浏览器推送渠道
     WebPush = "WebPush"
+    # MoviePilot-Server 中转的 App 和主屏幕网页通知渠道
+    AppPush = "AppPush"
     # QQ 消息渠道
     QQ = "QQ"
 

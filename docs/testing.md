@@ -82,6 +82,12 @@ focused 测试验证，不要求启动产品全套测试。
 
 ## 外部依赖：一律 mock，零真实网络
 
+高清杜比换域回归由 `tests/test_hddolby_spider.py`、`tests/test_hddolby_parser.py` 和
+`tests/test_site_connectivity.py` 验证：网页使用 `www.uhddolby.com` 时，搜索、用户资料和
+做种统计仍可按资源的 `api_url` 访问 `api.hddolby.com`，并保留站点代理和认证配置。
+API 连接失败或返回 HTTP 错误时，连通性提示指出实际接口主机；网页解析成功不能代替
+API 验证。错误提示和搜索告警不得输出地址中的账号、密码或查询令牌。测试不使用真实站点凭据。
+
 社区勋章使用 `tests/test_community_medal_background.py` 验证启动主动预热、无人访问时的六小时
 更新、失败后的自动重试及 TaskRegistry 关闭。外部下载或远端开关被屏障阻塞时，查询必须在
 屏障释放前返回当前快照；冷启动通过 `refreshing` 表示后台尚未完成，不能把刷新锁或网络等待
@@ -136,6 +142,17 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 这些场景只承诺已验证的 SMB 查询语义；为其他存储接入严格快照时，应在其 SDK/API
 边界复现同样的状态转换，并评估目录时间语义、分页和请求成本。
 
+`tests/test_u115_storage.py` 在 115 API 边界验证目录时间不推进时的深层新增、修改、
+保留旧时间的文件移入和删除，兼容空基线，并覆盖千条分页、递归深度和重复派发。
+115 快照不再按目录时间剪枝；扫描间隔、深度和接口限流不变，但每轮可能增加目录列表请求。
+这些用例不代表 115 已接入严格查询或验证了查询失败时的快照原子性。
+
+### 存储严格查询回执回归
+
+`tests/test_storage_cleanup_receipts.py` 通过真实 StorageChain、模块调度器和 FileManager，
+验证未知存储、未初始化模块、缺失模块和适配器不可用均保留整理历史。自定义存储提供方
+放在插件优先路径或宿主前后顺序时，都须能传递明确的文件项/不存在回执；普通查询仍可返回空值。
+
 ## 种子下载重试回归
 
 下载选集回归使用真实 qBittorrent/Transmission Module 与离线下载器端口，验证自定义识别词
@@ -161,6 +178,19 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 也须先恢复地址并共同进入下载选择；多个整包不完整、下载失败或恢复后已不可用时才回退分集。
 `tests/test_search_scan.py` 与 `tests/test_subscribe_paged_search.py` 在离线边界验证恢复、过滤和
 实际下载提交的先后顺序，同时保留普通补集按可用前缀提交的行为。
+
+同一轮分页搜索在站点冷却或时间片结束后恢复时，沿用已处理候选记录，避免无可用集数的
+候选反复重取原页并占用翻页预算。`tests/test_search_scan.py` 使用临时 SQLite、真实站点预算
+和虚拟时钟覆盖秒级冷却下的连续恢复，验证剩余来源继续翻页、末页候选处理后正常收尾，
+且未收录缺集仍保留。新一轮搜索或缺集范围扩大时重新评估候选；旧检查点缺少该记录时兼容恢复。
+
+本地流控等待由实际拒绝原因决定：访问间隔不足只等待间隔，计数配额耗尽才等待计数窗口。
+资源包说明包含上次访问时间时扣除已过去的时间，并保留一秒边界余量；原因未知时沿用保守窗口，
+时间缺失或无效时等待该规则全长。`tests/test_search_site_throttle.py`、`tests/test_search_scan.py`
+和 `tests/test_subscription_site_budget.py` 覆盖两类限制同时配置、剩余时间、时间异常与共享预算，
+验证短冷却不累计长冷却止损，也不会提前关闭优先站点。
+自动分页未实际发出请求时，共享预算取消完整请求间隔的预约，只保留实际剩余冷却；
+真实成功请求仍保留最小间隔。该收口使用临时 SQLite 验证跨订阅可见的预算时间和租约释放。
 
 全集洗版（`best_version=1`、`best_version_full=1`）的主动搜索始终使用洗版规则组，
 包括尚无下载记录或仍有缺集的订阅；未通过洗版规则的整包不会回落到普通订阅规则组。
@@ -199,6 +229,12 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 以及完整包和拆包保留每日限流原因并采用 24 小时冷却。缓存不保存缺集判断，
 当前识别词和允许集数仍在每批重新应用。
 
+## CUE 内容签名回归
+
+`tests/test_album_cue_cache_signature.py` 在同步及异步目录识别中等长改写真实 CUE 文件，
+恢复原 mtime，断言重新请求专辑匹配且使用新曲目。夹具使用不登记单例的专用真实 owner
+和私有目录缓存，不替换已有 MediaChain 实例或类缓存。
+
 ## 自隔离：用了什么，就还原什么
 
 `tests/test_workflow_safety.py` 使用真实工作流 manager、执行器和节点线程模拟同 ID 重跑、
@@ -208,6 +244,12 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 旧记录恢复、缓存授权以及管理员续聊保留原归属和实际执行人。
 图片代理测试通过真实组合根 HTTP Adapter 和 MockTransport 验证跳转在请求前拒绝，
 事件契约/SDK 测试同时验证诊断无原始输入和嵌套快照隔离，均无需外部网络。
+
+`tests/test_event_dispatch_snapshot.py` 使用真实线程池闸门和跨线程提交间隙验证事件关闭结算。
+同步、异步处理器正常返回、抛错或取消时，均先移除自己的 owner 登记，再发布完成信号，
+使关闭等待者不会被已完成但仍登记的句柄唤醒。同步完成观察者在通知调用栈中检查登记表；
+异步用例暂停提交线程在释放生命周期锁与登记完成回调之间的位置，处理器仍在真实事件循环中执行。
+尚未启动的异步提交取消也须清理登记、关闭原协程，并保留处理器内部停止时不等待或取消自身的语义。
 
 用例若修改了**进程级状态**——`sys.modules` 桩、单例（`Singleton._instances`）、`lru_cache`、环境变量、`settings` 字段——必须在用例或模块结束时还原。pytest 一次性导入全部测试模块，未还原的污染会扩散到后续用例，产生“单独跑过、一起跑挂”的测不准现象。
 
@@ -292,6 +334,12 @@ def test_recognize_prefers_explicit_identity(sample_meta, monkeypatch):
 - **不能自动删除的相似用例**：同步与异步入口、冷启动与重复重置、过期清理前后、迁移前后、不同平台或可选依赖条件，均可能拥有独立行为。
 - **没有直接 `assert` 不等于空测试**：`pytest.raises`、辅助断言、迁移 round-trip、导入兼容和“不抛异常”都是有效契约；只有名称或注释声称存在的覆盖则需要进一步核实。
 - **删除后验证**：运行受影响文件，核对保留用例及生产代码行/分支覆盖；跨领域清理再运行 `python tests/run.py`。不降低覆盖率基线、不新增 skip、不削弱架构或兼容门禁。
+
+## 插件发布快照与并发回归
+
+`tests/test_plugin_publish_snapshot.py` 固定读取快照，并在 package 返回后确定性推进远端引用，
+断言非强推冲突保留并发作者更新；自动初始化新仓后必须重新固定、读取和合并，不能把新主分支
+当空仓库。测试只替换 GitHub I/O，保留真实文件读取、清单合并与 Git Data 请求构造。
 
 ## 排查测试问题
 

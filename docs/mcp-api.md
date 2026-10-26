@@ -26,11 +26,66 @@
 升级前历史没有来源标记，界面显示“未记录”，不会按当前订阅设置追溯推断。
 普通订阅的首次提交与洗版订阅补缺在活动中都标记为首次订阅。
 
+### 大集合查询窗口
+
+`POST /api/v1/media/status` 接受 1 至 50 个媒体身份/标题/年份/季号查询，按输入顺序返回
+`item_id`、`subscribed` 与同来源剧集的各季订阅模式 `seasons`。查询仅访问本地媒体库和
+当前用户可见订阅，不调用外部媒体服务器，不返回完整订阅表。普通用户仍受 owner 限制，
+影视保留标题、年份回退，音乐按实体类型隔离。该界面专用批量端点不新增 Agent 操作。
+
+`search.recommend` 的 `check_only=true` 只读当前状态，不读取全量搜索结果缓存；
+推荐禁用时也直接返回 `disabled`。`force=true` 保留优先级，确实启动任务时才读取候选。
+前端轮询等待上次请求结束后再间隔五秒，后台标签暂停发包，离开资源页后停止轮询。
+
+卡片搜索配置与 `system/env` 在前端共享最多三十秒的只读快照，并合并并发请求；
+各表单持有独立副本。相关站点、系统设置和订阅写操作成功后，以及登录身份变化后，
+快照立即失效，在途旧结果不能写回新会话；失败查询允许重试。
+
+`GET /api/v1/site/userdata/{site_id}` 支持 `page` / `count`；趋势界面使用最近 90 条记录，
+并传入 `latest_seeding_only=true`，仅窗口内最新记录携带 `seeding_info`，历史统计字段不变。
+省略该选项时保留每条记录的完整明细；这不会删除或修改采集历史。
+
+`GET /api/v1/torrent/cache` 支持可选 `page` / `count`，每页最多 200 条，省略两项时保留全量合同。
+`title` 为不区分大小写的标题包含条件，`site` 为站点名称精确条件，均在分页前应用。
+`brief=true` 将描述截至 200 字符，缓存 hash 仍由完整原文生成。
+返回的 `count` / `sites` 是完整缓存统计，`total` 是筛选后数量，`site_names` 包含完整可选站点。
+分页只限制明细构造和响应，不改变底层缓存读取语义。
+
+`GET /api/v1/subscribe/calendar?start=2026-10-01&end=2026-11-01&page=1&count=50`
+面向日历界面，按真实播出/上映日期过滤后排序、分页，返回 `items` / `total`。
+`start` 包含当天，`end` 不包含当天，跨度最多 93 天，每页最多 200 条。
+每项仅含订阅展示/入库摘要、日期、分集标题/集号及片长，不包含窗口外分集、简介和演职人员。
+普通用户只能查询自己的订阅，管理员可查询全部；音乐订阅不进入影视日历。
+详情查询最多四路并发，复用现有媒体预缓存及五分钟的有界精简缓存；冷缓存仍可能等待媒体源。
+翻月或离开页面后客户端取消旧窗口，服务端探测断开后停止继续派发详情。
+该界面专用聚合端点未增加 Agent 操作；Agent 的 `subscription.list` 合同不变。
+
+### App 小组件只读接口
+
+主 App 使用既有登录通过 `/api/v1/widget/context` 核对账号、`/api/v1/widget/registrations` 登记。
+扩展使用独立的有限期只读 Bearer 通过 `/api/v1/widget/snapshot` 刷新。
+该凭据不适用于普通 REST/MCP，小组件接口也不加入 Agent 工具目录；
+详见[授权、权限与快照协议](widgets.md)。主登录凭据不得交给系统扩展。
+
 ### 通知配置与交互身份
+
+`GET /api/v1/message/notification` 的可空 `poster` 字段提供独立媒体海报。
+新通知从已有媒体上下文提取海报；`image` 继续保留原有渠道图片语义。
+旧通知及没有海报的通知返回 `poster: null`，客户端不应将背景图裁切成海报。
 
 `POST /api/v1/notification/config` 保存通知渠道时要求名称和稳定 `id` 各自唯一。
 改名应保留原 `id`；复制为新的渠道实例应使用新的 `id`，避免共享登录凭据。
 通过消息渠道发起普通重启时，完成回执保留发起时的 `source` 配置。
+
+`POST /api/v1/notification/app` 使用当前激活用户的既有 Bearer 登录态管理 AppPush，
+请求包含 `action`（`status/register/unregister/pair/test`）、随机 `installation` 和实例 `origin`。
+`register` 另需 APNs `token/topic/environment`；`source` 可选，用于选择启用的 AppPush 渠道。
+账号通知身份由后台注入，客户端不能指定其他用户。注销同时撤销该安装配对的主屏幕通知网页。
+AppPush 地址 `PUSH_SERVER_URL` 留空时使用 `MP_SERVER_HOST`；首次操作自动生成并先行持久保存256位实例凭据，再向中心幂等登记现有 `user_uid`。UID 只关联来源，不能据此获取、重置或认领已有凭据。内部 `AppPushCredentials` 按中心地址隔离，不进入通知渠道配置；中心只保存凭据摘要。已有 `PUSH_RELAY_KEY` 手工配置继续兼容。
+`POST /api/v1/notification/app/instance` 仅容器超级管理员可调用，正文为 `{"action":"rotate","source":"已保存的渠道名称"}`。轮换保留设备，候选凭据先落库，响应丢失可在重启后接续；返回值不包含密钥。普通用户的 `/notification/app` 不接受该动作。
+Apple/VAPID 私钥只放在中心 Server，不放入 App 或用户容器。
+消息沿用现有类型开关和管理员/用户路由；无明确用户目标时不广播。部署与免费自签说明见
+[MoviePilot-Server](https://github.com/jxxghp/MoviePilot-Server#私有-app-消息推送)。
 
 Discord 仅指定 `userid` 的定向通知使用私聊；无法私聊时返回失败，不转发公共频道。
 `/skills` 安装和删除按展示时的条目身份操作，刷新或翻页后的旧按钮会失效，应使用最新列表重新选择。
@@ -80,6 +135,11 @@ JSON 使用十进制字符串避免浏览器数字精度丢失，客户端应原
 - 每个请求都需要认证，包括初始化、发现工具和终止会话。密钥校验还要求实例中存在有效的超级管理员账号。
 - 这是**管理员级集成入口**，可以访问站点、配置、数据库及有副作用的操作。只向可信客户端提供密钥，并使用 HTTPS 或受信网络。
 - 写操作的用户授权由调用方负责取得；不要假设 MCP 会弹出 MoviePilot 内置 Agent 的确认界面。隐藏工具也不构成权限隔离。
+
+REST 兼容集成接口 `GET /api/v1/subscribe/list` 使用 `X-API-KEY: <API_TOKEN>`，
+也接受 `?token=<API_TOKEN>`；缺失、错误凭据或绑定的管理员身份失效时返回 HTTP `401`。
+认证成功后可读取全部用户的订阅及总量。Agent 的 `subscription.list` 使用当前用户身份访问
+`GET /api/v1/subscribe/`，普通用户只能读取自己的订阅。
 
 下文的 HTTP 示例使用两个占位环境变量，由接入方在自己的环境中设置。不要把真实密钥写进文档、模型提示词或代码仓库。
 
@@ -334,10 +394,12 @@ Emby、Jellyfin、Plex、Navidrome 的目录、条目、搜索、季集和活动
 | --- | --- |
 | `tables` | 空对象，返回实际表清单 |
 | `schema` | `table_name`，必须使用表清单中的精确名称 |
-| `query` | `sql` 与 `file` 二选一；`limit` 默认 100，范围 1–200；默认只读，`write` 默认 `false` |
-| `write` | `sql` 与 `file` 二选一；执行单条写入或结构变更语句，必须已有对应用户授权 |
+| `query` | `sql` 与 `file` 二选一；`limit` 默认 100，范围 1–200；默认只读，`write` 默认 `false`；`show_secrets` 默认 `false` |
+| `write` | `sql` 与 `file` 二选一；执行单条写入或结构变更语句，必须已有对应用户授权；引用 `systemconfig` 时同样需要 `show_secrets=true` |
 
 `file` 指 MoviePilot 运行环境中的 SQL 文件，不是客户端本地文件；外部接入通常直接传 `sql`。工具自行读取 MoviePilot 数据库配置，不接受任意连接串或数据库密码。
+
+`systemconfig` 集中存放实例级 API Key、Cookie 与口令，语句只要引用该表（含引号标识符、模式限定名和 CTE 写法）就被拒绝，除非显式传 `show_secrets=true`。该门禁按表生效，因此计数或只取键名也需要开启；宿主会把这类读取判定为敏感读取并要求确认，回执中不保留结果内容。读取普通设置仍应使用 `config.system.*`。 SQLite 另在执行连接上校验真实表访问，单引号表名与视图转引也不能绕过；语句结束后撤销临时授权回调。
 
 读取行时使用必要字段和有限窗口；写入前核对目标与条件，完成后只读核验。普通设置修改使用 `config.system.*`，避免绕过配置校验、事件通知和专用业务流程。更多约束见[数据库操作参考](../skills/database-operation/SKILL.md)。
 
