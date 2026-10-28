@@ -4,10 +4,13 @@
 
 import asyncio
 import json
+import uuid
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import unquote
 
+import httpx
 import pytest
 
 from app.agent.api.executor import ApiExecutionContext, MoviePilotApiExecutor
@@ -296,3 +299,93 @@ def test_executor_serializes_channel_and_source_headers_as_ascii() -> None:
     assert headers["X-MoviePilot-Agent-Channel"].isascii()
     assert headers["X-MoviePilot-Agent-Source"] == "%E4%BC%81%E4%B8%9A%E5%BE%AE%E4%BF%A1"
     assert headers["X-MoviePilot-Agent-Source"].isascii()
+
+
+def _build_context_headers(session_id: str) -> dict[str, str]:
+    """
+    用指定会话标识构造一次 Agent API 请求头。
+
+    :param session_id: 待写入会话头的 Agent 会话标识
+    :return: 执行器生成的完整请求头
+    """
+    executor = MoviePilotApiExecutor(
+        context=ApiExecutionContext(
+            user_id="1",
+            username="admin",
+            is_admin=True,
+            session_id=session_id,
+        )
+    )
+
+    with patch("app.agent.api.executor.create_access_token", return_value="token"):
+        return executor._build_headers()
+
+
+def test_executor_serializes_non_ascii_session_header_as_ascii() -> None:
+    """
+    微信等渠道的中文会话标识必须编码为 ASCII 头值，并可还原回原标识。
+    """
+    session_id = 'user_message:["wechat","wc1","张三的微信"]_1793057820'
+
+    headers = _build_context_headers(session_id)
+
+    session_header = headers["X-MoviePilot-Agent-Session"]
+    assert session_header.isascii()
+    assert unquote(session_header) == session_id
+    # httpx 在发送前按 ASCII 编码头值，非 ASCII 会话标识会直接抛 UnicodeEncodeError。
+    httpx.Headers(headers)
+
+
+def test_executor_keeps_ascii_session_header_verbatim() -> None:
+    """
+    默认随机生成的会话标识不含需转义字符，编码后必须保持原值以兼容既有读取方。
+    """
+    session_id = uuid.uuid4().hex
+
+    headers = _build_context_headers(session_id)
+
+    assert headers["X-MoviePilot-Agent-Session"] == session_id
+
+
+@pytest.mark.parametrize("channel,channel_user_id", [
+    (NotificationChannel.Telegram.value, "123456789"),
+    (NotificationChannel.Wechat.value, "张三"),
+    (NotificationChannel.Telegram.value, None),
+    (None, "123456789"),
+])
+def test_executor_signs_channel_user_into_host_token(channel, channel_user_id) -> None:
+    """
+    渠道发起人只写入宿主令牌的签名声明，不再以可伪造的请求头透传。
+    """
+    executor = MoviePilotApiExecutor(
+        context=ApiExecutionContext(
+            user_id="1",
+            username="admin",
+            is_admin=True,
+            channel=channel,
+            channel_user_id=channel_user_id,
+        ),
+        request_factory=MagicMock(return_value=SimpleNamespace(request=AsyncMock())),
+    )
+
+    with patch("app.agent.api.executor.create_access_token", return_value="token") as create_token:
+        headers = executor._build_headers()
+
+    signed = bool(channel and channel_user_id)
+    assert create_token.call_args.kwargs.get("agent_channel") == (channel if signed else None)
+    assert create_token.call_args.kwargs.get("agent_channel_user") == (channel_user_id if signed else None)
+    assert not any(name.lower() == "x-moviepilot-agent-user" for name in headers)
+
+
+def test_public_executor_never_signs_channel_user() -> None:
+    """
+    公共只读执行器即使收到渠道上下文，也不能把个人发起人绑定到宿主身份。
+    """
+    executor = MoviePilotApiExecutor(context=ApiExecutionContext(
+        user_id="1", username="admin", is_admin=True, public_read_only=True,
+        channel=NotificationChannel.Telegram.value, channel_user_id="123456789",
+    ))
+    with patch("app.agent.api.executor.create_access_token", return_value="token") as create_token:
+        executor._build_headers()
+
+    create_token.assert_called_once_with(userid=1, username="admin", super_user=True)

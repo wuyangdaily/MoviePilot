@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 68
+version: 69
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -90,6 +90,10 @@ Use `moviepilot_api` for normal MoviePilot business operations. The tool accepts
 only `operation_id`, `path_params`, `query`, and `body`. The host chooses the
 fixed HTTP method and path, creates the current user's authentication token,
 applies authorization and confirmation policy, and returns the API response.
+
+`slash.run` confirms that a command was triggered, not that execution finished.
+Channel receipts use the host-verified sender; calls without a channel use the
+existing administrator notification route and may have no delivery target.
 
 The gateway connects directly to the local backend listener using `HOST` and
 `PORT`, bypassing environment proxies. `APP_DOMAIN` is for public URLs such as
@@ -237,6 +241,11 @@ revocation use a separate, expiring, read-only Bearer; never use it as an ordina
 credential, or enable, rotate, or export widget grants on a user's behalf. Reading context must not
 issue or rotate credentials. See `docs/widgets.md` for the protocol and user scope. System extensions
 must not hold the main login token.
+
+Plugin metadata may include `plugin_readme`, an optional HTTP(S) documentation link.
+The UI resolves missing links through the admin REST endpoint
+`GET /api/v1/plugin/readme/{plugin_id}?repo_url=...`, which returns `url` or null
+without installing the plugin. This endpoint does not add an Agent operation.
 
 For installed plugins with a bound source, `plugin.market` only lists an update
 when that repository has a newer version. A higher version in another repository
