@@ -7,6 +7,7 @@ import secrets
 import threading
 from collections.abc import Callable
 from typing import Any, Optional, Union
+from urllib.parse import urlsplit
 
 from app.adapters.external.server import MoviePilotServerHelper
 from app.application.configuration import get_configured_system_config
@@ -211,6 +212,39 @@ class AppPushModule(_ModuleBase, _MessageBase[object]):
         except ValueError as error:
             return {"success": False, "message": str(error)}
 
+    def _notification_owners(self, message: Message) -> tuple[str, ...]:
+        """
+        解析明确单账号或所有用户路由生成的账号集合，缺少目标时不隐式广播。
+
+        :param message: 已由通知链确定范围和账号目标的消息
+        :return: 本渠道需要逐个投递的不可变账号身份
+        """
+        target = (self.get_notification_targets(message) or {}).get("apppush")
+        if isinstance(target, str):
+            return (target,) if target else ()
+        if message.notification_route_scope == "all" and isinstance(target, tuple):
+            return tuple(dict.fromkeys(target))
+        return ()
+
+    @staticmethod
+    def _notification_image(message: Message) -> Optional[str]:
+        """
+        优先传递独立海报，兼容旧消息图片；非网页图片不影响正文投递。
+
+        :param message: 现有通知链提供的海报和图片引用
+        :return: 无凭据且长度受限的 HTTP(S) 地址，无可用图片时返回 None
+        """
+        for value in (message.poster, message.image):
+            if not value or len(value) > 2048 or "\\" in value or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+                continue
+            try:
+                parsed = urlsplit(value)
+                if parsed.scheme in {"http", "https"} and parsed.hostname and parsed.username is None and parsed.password is None:
+                    return value
+            except ValueError:
+                continue
+        return None
+
     def post_message(self, message: Message, **kwargs: object) -> None:
         """
         仅向路由确定的不可变账号身份投递；缺少绑定绝不退回全设备广播。
@@ -218,18 +252,18 @@ class AppPushModule(_ModuleBase, _MessageBase[object]):
         for conf in self.get_configs().values():
             if not self.check_message(message, conf.name):
                 continue
-            owner = str((self.get_notification_targets(message) or {}).get("apppush") or "")
-            if not owner:
-                continue
             link = message.link or "/?shotcut=message"
             # 外部下载或媒体链接留在消息列表中，系统通知点击始终交给本实例。
             route = link if link.startswith("/") and not link.startswith("//") and "\\" not in link else "/?shotcut=message"
-            try:
-                result = self._request(conf, "POST", "messages", {
-                    "owner": owner, "title": (message.title or "MoviePilot")[:256],
-                    "body": (message.text or "")[:1000], "route": route,
-                })
-                if result.get("failed"):
-                    logger.warning(f"AppPush 有 {len(result['failed'])} 个设备投递失败，请检查 Server 配置")
-            except ValueError as error:
-                logger.warning(f"AppPush 投递失败：{error}")
+            image = self._notification_image(message)
+            for owner in self._notification_owners(message):
+                try:
+                    result = self._request(conf, "POST", "messages", {
+                        "owner": owner, "title": (message.title or "MoviePilot")[:256],
+                        "body": message.text or "", "route": route,
+                        **({"image": image} if image else {}),
+                    })
+                    if result.get("failed"):
+                        logger.warning(f"AppPush 有 {len(result['failed'])} 个设备投递失败，请检查 Server 配置")
+                except ValueError as error:
+                    logger.warning(f"AppPush 投递失败：{error}")

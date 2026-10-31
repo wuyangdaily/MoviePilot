@@ -62,6 +62,11 @@ focused 测试验证，不要求启动产品全套测试。
 提交失败与取消后的重试，以及关闭超时保留资源。`tests/test_telegram.py` 覆盖海报失败后的文本
 兜底、会话/话题/按钮保留、429 不追加请求，以及发送失败不能被 outbox 当作成功确认。
 
+AppPush 的所有用户范围由 `tests/test_notification_routing_parity.py` 验证：下载、入库和订阅消息
+经同步、异步与持久事件入口到达真实渠道；明确用户和管理员范围保持隔离，组合范围不重复发送。
+`tests/test_user_repository.py` 使用临时数据库验证接收集合只含启用账号的不可变身份，
+`tests/test_apppush.py` 验证无明确范围时不广播，以及单账号投递失败不阻断其他账号；投递 HTTP 均使用替身。
+
 `tests/test_db_error_diagnostics.py` 在临时 SQLite 的同步及异步连接池中注入
 `SQLITE_IOERR_SHORT_READ`：失败事务保留原始异常、不自动重放写入，后续独立事务
 使用新连接恢复；锁争用和约束错误不触发额外的连接失效。
@@ -168,6 +173,11 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 验证双语作品名及艺人署名只有在括号两侧均属于同一实体的可信名称时才匹配；
 未知别名、副标题、不同录音版本及歌曲所属专辑继续保留各自的身份边界。
 
+`tests/test_subscribe_media_id_conflict.py` 与 `tests/test_subscribe_type_conflict.py` 验证
+订阅候选已识别出的媒体来源、ID 或类型冲突时直接拒绝，不以标题、别名或年份覆盖身份。
+《剑来》同名真人与动漫的离线回归覆盖资源年份一致、共同首播年份及缺失年份，断言动漫
+不会进入下载且共享候选不被回填；身份一致的资源和未识别出身份的标题兜底仍可下载。
+
 普通电视剧首次下载的整包优先回归见 `tests/test_subscribe_paged_search.py`：订阅没有下载记录，
 且最新媒体库缺失全部目标集时，先收集所选搜索范围内的候选再尝试完整包；单页策略仍只查每个
 来源的第一页。整包继续通过规则过滤、优先级门槛和种子文件完整覆盖校验，无可用整包时按集
@@ -201,8 +211,15 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 种子下载重试的离线边界见 `tests/test_torrent_download_retry.py`：普通 GET 在网络失败、
 403/5xx、空响应或无法解析的响应后最多重试两次，退避为 1、2 秒。签名链接刷新、换票地址、
 首次下载确认按 HTML 表单语义读取控件，兼容单双引号、属性顺序、空 action 和提交按钮；
-仅向同来源的下载端点提交一次 POST，使用确认页地址作为 Referer。HTTP 429 或 JSON `message` / `msg` 明确提示限流时，
+仅向同来源的下载端点提交一次 POST，使用确认页地址作为 Referer。HTTP 429、JSON `message` / `msg` 或 HTML 频控页明确提示限流时，
 停止短退避重试并在通知中保留原因，不把限流响应交给种子解析器或写入无效地址缓存。
+
+`tests/test_site_request_throttle.py` 验证搜索、换票、取种子、重定向和确认 POST 共享站点的
+`limit_seconds`、`limit_interval`、`limit_count`，不同 API 主机按原站点 ID 共用额度。
+HTML `Request frequency limit, please try in N seconds` 按 N 秒冷却整个站点；冷却期间
+不再请求或刷新签名，并保留原文到通知和下载失败记录。虚拟时钟、并发许可和异步取消用例
+验证实际请求起点，缓存命中不消耗额度。无需要集数的拆包继续复用已验证的种子内容，
+不会被记录为资源下载失败；缺集变化后仍可立即选用缓存中的集数。
 测试替换 HTTP 端口与等待，不访问真实站点。
 瞬时状态不会写入 24 小时无效链接缓存；订阅记录的泛化“下载种子内容为空”使用 1 小时冷却，
 明确资源失效仍保留 24 小时冷却。每日下载配额耗尽冷却 24 小时，覆盖站点时区差异；
