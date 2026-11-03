@@ -12,6 +12,15 @@
 缺失或超时返回 `{"url":null}`，不要求先安装插件。本地来源只返回显式声明的链接。
 探测总时限为五秒，结果缓存五分钟；接口不返回文档正文，也不新增 Agent operation。
 
+### 插件生命周期忙碌与超时
+
+`plugin.runtime.status`（`GET /api/v1/plugin/runtime`）的可选 `active_operation` 返回当前
+`operation`、`plugin_id`、`hook`、`elapsed_seconds` 与 `hook_elapsed_seconds`；空值表示没有
+持有者。有在途变更或钩子时 `ready=false`，准备态数量仍由 `pending_count` 独立表达。
+插件变更竞争共享执行权时在副作用前明确拒绝；安装的逐插件或启动准入最多等待五秒。
+调用方超时、取消或停机超时不会终止第三方同步钩子，执行权、实例及数据库保留到真实结束。
+遇到执行结果未知时先只读检查此摘要及插件实际状态，不能仅凭超时重复提交变更。
+
 ### 订阅下载的提交来源
 
 新产生的订阅下载在订阅活动和日志中区分“首次订阅”“洗版升级”或“全集洗版”。
@@ -33,6 +42,44 @@
 
 升级前历史没有来源标记，界面显示“未记录”，不会按当前订阅设置追溯推断。
 普通订阅的首次提交与洗版订阅补缺在活动中都标记为首次订阅。
+
+### WebAgent 会话状态
+
+`POST /api/v1/message/agent/callback` 在返回前保存首次选择。`already_selected=true` 表示
+该选择已领取执行，客户端仅恢复原反馈；已选但尚未执行时返回 `false`，可重试原选项。
+后端按用户、会话和选择 ID 领取一次执行；入队前明确拒绝可重试，执行结果未知时不重放。
+`echo_user=false` 仅隐藏用户回显，选择结果仍保存；完整快照替换保留隐藏选择收据，
+即使旧快照不含卡片，也不能让后续快照把已选卡片改回 `pending`。普通消息仍按完整快照替换。
+
+会话 `is_processing` 只表示实际执行或排队，空闲等待下一条消息的 worker 不计入。
+工具事件沿用 `tool_id` 与 `assistant_message_id`，跨 steering 后仍更新原助手段。
+全流结束收口所有助手段；缺少终态的结构化工具标为 `error`，旧文本提示保留完成兼容。
+
+### 资源搜索诊断
+
+Web 影视精确与标题 SSE 的 `manual_paging=true` 模式在最终 `done` 事件增加可选
+`diagnostics`。V1 的 `scope=page` 仅覆盖当前页请求，续页沿用来源中的 `search_id`。
+旧后端可缺省此字段，客户端应兼容 `null` 和未知原因代码。普通资源 API 的 `data` 数组
+及 `GET /api/v1/search/last` 保持原合同。
+
+- `searched_sites` 提供实际调度来源的 `site_id`、`site_name`、`attempted`、`outcome`
+  和 `raw_count`。状态为 `success`、`empty`、`error`、`cooldown` 或 `unknown`；
+  未发请求的冷却标记为 `attempted=false`。别名请求和摘要补取的数量按站点累加。
+- `stage_counts` 包含候选数 `candidates` 和保留数 `retained`。`rejection_reasons`
+  使用 `{code,count}`：`filter_params`、`filter_rules`、`title_missing`、`scope_mismatch`、
+  `identity_mismatch`、`caller_filter`、`duplicate`。身份不符可能包含类型不符；
+  索引器内部未报告的丢弃原因不作推测。
+- `rule_groups` 包含 `name`、`status`、`reason`、`media_type` 和 `categories`。
+  `effective` 表示规则适用，`skipped` 不增加拒绝数。标题搜索沿用过滤器的空媒体上下文。
+- `warnings` 使用 `{code,rule_group?}`，代码包括 `rule_group_not_applicable`、
+  `rule_group_missing`、`provider_error`、`provider_cooldown`、`provider_outcome_unknown`。
+  原始异常、下载地址和凭据不进入诊断。
+
+`GET /api/v1/search/last/context` 按认证用户返回完整的 `params`、`results` 和可选
+`diagnostics`。同一用户并发搜索按完成顺序保存，异常或取消保留上次完整记录。普通
+影视、标题、字幕 API 和旧 SSE 完成后也保存结果（含空结果），`diagnostics=null`；
+字幕链接在读取时重新签名。旧全局缓存不迁移，升级后需重新搜索；首次搜索前返回
+空参数、空结果和 `diagnostics=null`。
 
 ### 大集合查询窗口
 

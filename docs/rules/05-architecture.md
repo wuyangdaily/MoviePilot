@@ -676,18 +676,21 @@ Shared subscription metadata and media-key construction belongs to
 `app.application.subscription.contract`; `app.chain.subscribe` is a same-named package
 whose root exposes only the stable `SubscribeChain`. `facade.py` owns the class
 identity and event entry wrappers; `create.py`, `search.py`, `match.py`, `refresh.py`,
-`completion.py`, `music.py`, `reconcile.py` and `notify.py` are the single owners of their
+`completion.py`, `music.py`, `reconcile.py`, `library.py` and `notify.py` are the single owners of their
 respective workflows, while `query.py`, `interaction.py`, `identity.py` and `policy.py`
 own the remaining focused capabilities. Startup imports the subscription share Port
 directly from `notify.py`; canonical callers import identity projection directly from
 `identity.py`. The retired `app/chain/subscribe.py` monolith must not return, package
 owners must not be re-exported, and `_music` must not import its concrete chain owner.
+`library.py` 消费整理完成事件，把本次交付的集号补写为订阅的入库集号并同步收缩缺失集数，
+使订阅卡片与日历在整理完成后立即反映媒体库状态；入库事实只按订阅目标范围内的集号写入，
+缺失集数与入库集号来自同一份事实。
 `music.py` 通过已注入的下载/整理历史 Port 关联成功入库文件，只读取本地音频标签和
 有效 CUE，按真实发行身份分组对账；发行身份与逐盘完整覆盖的纯规则归 `domain/music.py`。
 它通过既有订阅 mutation 写入事实和总曲目数，不新增数据库字段，也不从文件数量猜测完成。
 下载提交 owner 则按种子实际 hash、全部音频成功整理记录及仍存在的本地目标阻止音乐订阅重复提交；人工下载
 和未完整整理的任务保留原行为。新增 owner 使冷导入宿主模块数各增加 1：
-`app.startup.lifecycle` 586 → 587、`app.factory` 599 → 600、`app.main` 601 → 602；
+`app.startup.lifecycle` 598 → 599、`app.factory` 612 → 613、`app.main` 614 → 615；
 原有耗时预算、采样和生命周期约束保持不变。
 `app.chain.search.execution` reads the Application-owned `SubscriptionSiteBudget`
 contract to apply subscription-only keyword scheduling and IMDb query deduplication;
@@ -1301,6 +1304,7 @@ driven workflow registration.
 | `app/runtime/extensions/module/manager.py` | Module discovery and lifecycle |
 | `app/runtime/extensions/plugin/manager.py` | Stable PluginManager ABI facade plus plugin discovery/lifecycle entrypoints; its constructor only consumes the startup-injected Runtime factory and does not build an environment or individual owner |
 | `app/runtime/extensions/plugin/runtime.py` | Frozen typed aggregate and construction primitive for plugin registry, lifecycle, catalog, dependency, monitor, projection, sync and package-system owners; it does not choose concrete startup dependencies |
+| `app/runtime/extensions/plugin/gate.py` | 插件生命周期的可重入执行权与钩子耗时快照；仅更新 owner 时持锁，竞争者立即拒绝，第三方代码在锁外执行；`admission.py` 在完整可变事务的副作用前取得同一运行时的根事务资格 |
 | `app/runtime/extensions/plugin/system.py` | Startup-injected market/package/dependency system-port facade, including delegation to the unique physical package deletion owner; it does not construct concrete adapters |
 | `app/runtime/extensions/plugin/dependency.py` | Virtual-instance dependency classification and runtime-status persistence owner |
 | `app/startup/initializers/plugins.py` | Plugin Runtime dependency-graph composition, concrete system/storage/catalog ports and lifecycle initialization |
@@ -1319,6 +1323,7 @@ driven workflow registration.
 | `app/application/server/report.py` | Server reporting use cases over injected local readers and transport callbacks |
 | `app/application/server/share.py` | Server sharing use cases over injected repositories and transport callbacks |
 | `app/domain/plugin.py` | Pure local-source, generation-compatibility and Release-install-plan rules |
+| `app/domain/chat.py` | 会话展示快照的纯选择状态合并规则；保留首次选择，不读取交互管理器或持久化服务 |
 | `app/adapters/external/plugin/client.py` | `PluginMarketTransport`, the unique market transport, index/Release and local-candidate owner |
 | `app/adapters/system/plugin/package.py` | `PluginPackageManager`, the unique install, checkpoint, backup, restore and physical-delete owner |
 | `app/adapters/system/plugin/dependency.py` | `PluginDependencyInstaller`, enabled-source dependency inspection and constrained per-plugin recovery owner; `async_install` has two completion-owned worker boundaries for request preparation and fallback planning, while package subprocess cancellation remains with `PluginRuntimeHealth` |
