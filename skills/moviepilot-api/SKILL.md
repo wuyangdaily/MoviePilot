@@ -1,6 +1,6 @@
 ---
 name: moviepilot-api
-version: 72
+version: 73
 description: >-
   Use this skill for MoviePilot product operations such as media search, torrent
   search, downloads, subscriptions, library checks, sites, storage, workflows,
@@ -71,6 +71,11 @@ When a plugin mutation is busy or its outcome is unknown, inspect `plugin.runtim
 before retrying. `active_operation` identifies the running plugin, operation, hook, and
 elapsed time. A caller timeout or cancellation does not stop the hook and must never
 trigger automatic replay of the same mutation.
+
+`plugin.config.update` replaces the complete configuration. Preserve every field
+not intentionally removed. The gateway rejects an empty object or redacted
+credential placeholders such as `***`; do not guess their original values. If the
+available configuration contains placeholders, use the plugin configuration UI.
 
 For a historical invalid plugin instance ID reported in logs, `plugin.instance.purge`
 accepts the exact ID with only `config: true` (all other scope flags false). It deletes
@@ -369,11 +374,15 @@ token exchange downloads retain their existing credential rules.
 - Treat `success=false`, HTTP error data, empty results, and validation errors as
   real outcomes. Do not claim success without checking the response.
 - `media.scrape` reports rejected media and failed NFO writes as business failures,
-  including failures within a directory. For concurrent custom-filter changes,
-  re-read the rules and confirm the intended change before retrying a conflict.
+  including failures within a directory. For music albums, report its `message`:
+  track titles, artists and numbers are retained by default; the music tag
+  overwrite policy only updates reliably aligned tracks. An aligned count does
+  not prove every tag changed. For concurrent custom-filter changes, re-read
+  the rules and confirm the intended change before retrying a conflict.
 - Respect an explicit `execution_outcome`: `pending` is accepted but unfinished,
-  while `unknown` means a write may have happened. Do not repeat an unknown write
-  or change defaults merely to evade duplicate protection. In the built-in Agent,
+  `unknown` means a write may have happened, and `replayed` means this call did
+  not execute; `previous_status` describes the earlier receipt. Do not repeat an
+  unknown write or change defaults merely to evade duplicate protection. In the built-in Agent,
   use `get_tool_execution` with the returned invocation ID; the host can reconcile
   supported non-sensitive setting replacements through a read-only check.
 - When a built-in Agent preview contains `result_id` and `next_offset`, use
@@ -411,6 +420,12 @@ token exchange downloads retain their existing credential rules.
 - Recent `search.results` snapshots belong to the authenticated user; search again after
   upgrading to populate them. Optional Web `done.diagnostics` uses `scope=page` for the current
   page. Skipped rule groups do not increase the resource rejection count.
+- Page diagnostics `rule_id_invalid`, `rule_id_missing`, and `rule_syntax_invalid`
+  describe configuration errors in selected applicable rule groups, not ordinary
+  resource mismatches. Optional `warnings.rule_ids` preserves complete IDs and
+  surrounding whitespace. Use rule APIs to rename IDs and references together;
+  do not edit the database. Upgrade migration handles unambiguous legacy IDs;
+  confirm ambiguous references manually instead of relaxing parsing or skipping rules.
 - For list inspection, explicitly send the operation's documented pagination
   fields instead of requesting an unbounded legacy result. For optional legacy
   pagination, start with `query={"page":1,"count":20}`.

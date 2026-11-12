@@ -8,8 +8,8 @@ import time
 from collections.abc import Mapping
 from typing import Optional
 
+from app.application.site.protocol import site_domain
 from app.application.site.query import get_configured_site_query_service
-from app.domain import site as site_rules
 from app.domain import torrent as torrent_rules
 from app.runtime.rate import RequestRateLimiter
 from app.schemas.exception import RateLimitExceededException
@@ -26,7 +26,7 @@ def site_request_config(url: str, site_id: Optional[int] = None) -> dict[str, ob
     :return: 不含认证凭据的站点流控快照；未保存的地址只使用域名隔离冷却
     """
     query = get_configured_site_query_service()
-    domain = site_rules.extract_domain(url)
+    domain = site_domain(url)
     site = query.get_sync(site_id) if site_id is not None else query.get_by_domain_sync(domain)
     if site is None:
         return {"id": site_id, "domain": domain}
@@ -58,8 +58,9 @@ def _request_delay(site: Mapping[str, object]) -> float:
     """
     原子申请一次站点请求，远端冷却期间直接返回原始原因。
     """
+    interval = _positive_number(site.get("limit_seconds"))
     delay, reason = _site_requests.acquire(
-        _site_key(site), interval=_positive_number(site.get("limit_seconds")),
+        _site_key(site), interval=interval,
         window=_positive_number(site.get("limit_interval")), count=int(_positive_number(site.get("limit_count"))),
     )
     if reason:

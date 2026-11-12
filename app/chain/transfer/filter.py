@@ -76,6 +76,27 @@ class NetworkFilesystemPort(Protocol):
 _network_filesystem_lock = threading.RLock()
 _network_filesystem_port: Optional[NetworkFilesystemPort] = None
 
+# 影视与音乐目录中可直接随主媒体迁移的标准封面文件名。
+_MEDIA_COVER_STEMS = frozenset({
+    "art",
+    "back",
+    "backdrop",
+    "background",
+    "banner",
+    "clearart",
+    "cover",
+    "fanart",
+    "folder",
+    "front",
+    "landscape",
+    "logo",
+    "poster",
+    "season",
+    "thumb",
+    "thumbnail",
+})
+_MEDIA_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
 
 def configure_network_filesystem_port(
         port: NetworkFilesystemPort,
@@ -156,14 +177,32 @@ class _MusicFileFilterBase(_TransferOwnerBase):
 
     def _is_subtitle_file(self, fileitem: FileItem) -> bool:
         """
-        判断是否为字幕文件
+        判断是否为字幕或配置中声明的歌词文件。
+
+        歌词与字幕一样按同名主媒体继承识别结果，避免旁挂文件单独进入媒体识别。
+
+        :param fileitem: 待判断的文件项
+        :return: 文件后缀属于字幕或歌词配置时返回 True
         """
         if not fileitem.extension:
             return False
         return (
-            True if f".{fileitem.extension.lower()}" in self._subtitle_exts else False
+            f".{fileitem.extension.lower()}" in self._subtitle_exts
+            or self._is_configured_lyrics_file(fileitem)
         )
 
+    def _is_configured_lyrics_file(self, fileitem: FileItem) -> bool:
+        """
+        按运行时歌词后缀配置判断文件是否为歌词旁挂文件。
+
+        :param fileitem: 待判断的文件项
+        :return: 文件名以配置的歌词后缀结尾时返回 True
+        """
+        path = str(fileitem.path or fileitem.name or "").casefold()
+        return any(
+            path.endswith(str(extension).casefold())
+            for extension in getattr(self, "_lyrics_exts", ())
+        )
     def _is_audio_file(self, fileitem: FileItem) -> bool:
         """
         判断是否为音频文件
@@ -172,13 +211,18 @@ class _MusicFileFilterBase(_TransferOwnerBase):
             return False
         return True if f".{fileitem.extension.lower()}" in self._audio_exts else False
 
-    @staticmethod
-    def _is_music_lyrics_file(fileitem: FileItem) -> bool:
+    def _is_music_lyrics_file(self, fileitem: FileItem) -> bool:
         """
         判断文件是否为可随同名音乐音轨迁移的歌词旁挂文件。
+
+        配置中的歌词后缀供所有媒体类型使用；TXT 和 Lyricsfile YAML 保留为
+        音乐专用的历史兼容格式，避免改变既有音乐目录整理行为。
+
+        :param fileitem: 待判断的文件项
+        :return: 文件属于配置歌词后缀或音乐历史歌词格式时返回 True
         """
         path = str(fileitem.path or fileitem.name or "").casefold()
-        return path.endswith((".lrc", ".txt", ".lyricsfile.yaml"))
+        return self._is_configured_lyrics_file(fileitem) or path.endswith((".txt", ".lyricsfile.yaml"))
 
     @staticmethod
     def _is_music_cover_file(fileitem: FileItem) -> bool:
@@ -188,6 +232,19 @@ class _MusicFileFilterBase(_TransferOwnerBase):
         return get_runtime_setting("MUSIC_LOCAL_COVER_ENABLE") and fileitem.type == "file" and music_cover_priority(
             str(fileitem.path or fileitem.name or ""), get_runtime_setting("MUSIC_COVER_FILE_PATTERNS")
         ) is not None
+
+    @staticmethod
+    def _is_media_cover_file(fileitem: FileItem) -> bool:
+        """
+        判断是否为影视或音乐目录中的标准封面图片。
+
+        :param fileitem: 待判断的文件项
+        :return: 文件是标准封面名且使用受支持图片格式时返回 True
+        """
+        if fileitem.type != "file" or not fileitem.path:
+            return False
+        path = Path(fileitem.path)
+        return path.suffix.casefold() in _MEDIA_IMAGE_SUFFIXES and path.stem.casefold() in _MEDIA_COVER_STEMS
 
     def _is_media_file(
             self,
@@ -351,18 +408,18 @@ class _MusicFileFilterBase(_TransferOwnerBase):
         # Recording 可能同时属于多个发行版，候选 release 的曲序并不一定对应
         # 用户手里的这一版；只有本地没有这些字段时才用远端值补齐，避免同一
         # 专辑的多首歌被错误写到相同目标文件名并相互覆盖。
-        if not merged_meta.disc_number and info.disc_number:
-            merged_meta.disc_number = info.disc_number
-            merged_meta.field_sources["disc_number"] = info.field_sources.get("disc_number", "remote")
-        if not merged_meta.track_number and info.track_number:
-            merged_meta.track_number = info.track_number
-            merged_meta.field_sources["track_number"] = info.field_sources.get("track_number", "remote")
-        if not merged_meta.total_tracks and info.total_tracks:
-            merged_meta.total_tracks = info.total_tracks
-            merged_meta.field_sources["total_tracks"] = info.field_sources.get("total_tracks", "remote")
-        if not merged_meta.total_discs and info.total_discs:
-            merged_meta.total_discs = info.total_discs
-            merged_meta.field_sources["total_discs"] = info.field_sources.get("total_discs", "remote")
+        # 用户显式选定发行版时除外：曲目已逐一对齐到该发行版，线上碟数与曲序
+        # 就是该发行版的结构，本地错标（如单碟专辑 total_discs=2）不能再盖过
+        # 线上值，否则会多出 Disc 层或写错曲序。
+        for key in ("disc_number", "track_number", "total_tracks", "total_discs"):
+            value = getattr(info, key)
+            if not value:
+                continue
+            if selected_release or not getattr(merged_meta, key):
+                setattr(merged_meta, key, value)
+                merged_meta.field_sources[key] = (
+                    "manual" if selected_release else info.field_sources.get(key, "remote")
+                )
         merged_meta.media_source = info.media_source
         merged_meta.media_id = info.media_id
         merged_meta.music_type = info.music_type
@@ -406,11 +463,11 @@ class FileFilterMixin(_TransferOwnerBase):
         _MusicFileFilterBase._requires_automatic_category
     ))
     _is_subtitle_file = cast(Any, _MusicFileFilterBase._is_subtitle_file)
+    _is_configured_lyrics_file = cast(Any, _MusicFileFilterBase._is_configured_lyrics_file)
     _is_audio_file = cast(Any, _MusicFileFilterBase._is_audio_file)
-    _is_music_lyrics_file = cast(
-        Any, staticmethod(_MusicFileFilterBase._is_music_lyrics_file)
-    )
+    _is_music_lyrics_file = cast(Any, _MusicFileFilterBase._is_music_lyrics_file)
     _is_music_cover_file = cast(Any, staticmethod(_MusicFileFilterBase._is_music_cover_file))
+    _is_media_cover_file = cast(Any, staticmethod(_MusicFileFilterBase._is_media_cover_file))
     _is_media_file = cast(Any, _MusicFileFilterBase._is_media_file)
     _is_primary_media_file = cast(Any, _MusicFileFilterBase._is_primary_media_file)
     _music_info_from_meta = cast(
@@ -690,11 +747,20 @@ class FileFilterMixin(_TransferOwnerBase):
 
     def _is_allowed_file(self, fileitem: FileItem) -> bool:
         """
-        判断是否允许的扩展名
+        判断文件是否使用允许的扩展名。
+
+        配置项允许使用多段后缀时，以完整路径结尾匹配歌词文件，避免
+        ``Path.suffix`` 只保留最后一段造成误判。
+
+        :param fileitem: 待判断的文件项
+        :return: 文件扩展名受支持时返回 True
         """
         if not fileitem.extension:
             return False
-        return True if f".{fileitem.extension.lower()}" in self._allowed_exts else False
+        return (
+            self._is_configured_lyrics_file(fileitem)
+            or f".{fileitem.extension.lower()}" in self._allowed_exts
+        )
 
     @staticmethod
     def _is_allow_filesize(fileitem: FileItem, min_filesize: int) -> bool:
