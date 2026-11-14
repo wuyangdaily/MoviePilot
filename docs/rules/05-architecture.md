@@ -45,7 +45,7 @@ Entrypoints (app/api, app/command, app/monitor, app/scheduler, app/agent, app/wo
 | Package | Responsibility and Ownership Boundary |
 | --- | --- |
 | `app/foundation/` | Generic reflection, collection/text/time utilities and pure helpers independent of MoviePilot state |
-| `app/domain/` | Pure business rules — `meta/` and `metainfo.py` (title/release recognition), `projection/` (immutable TMDB/Douban/Bangumi/AniList to `MediaInfo` mappers imported directly by host callers instead of legacy `MediaInfo` setters), media identity source policy (`media.py`), music release/disc/cover rules (`music.py`), torrent identity (`torrent.py`), search collection rules (`search.py`), `classification/`, `plugin.py` and `chat.py` |
+| `app/domain/` | Pure business rules — `meta/` and `metainfo.py` (title/release recognition), `projection/` (immutable TMDB/Douban/Bangumi/AniList to `MediaInfo` mappers imported directly by host callers instead of legacy `MediaInfo` setters), media identity source policy (`media.py`), music release/disc/cover rules (`music.py`), torrent identity and episode file selection (`torrent.py`), search collection rules (`search.py`), `classification/`, `plugin.py` and `chat.py` |
 | `app/application/` | Typed use-case services, deeply frozen snapshots and port `Protocol` definitions (`subscription/`, `history/`, `transfer/`, `download/`, `search/`, `site/`, `plugin/`, `security/`, `server/`, `chain/`, `outbox.py`, `agent.py`, `workflow.py`, `scheduling.py`, `commands.py`, `system.py`, `network.py`, `notification.py`, `mediaserver.py`, `rss.py`, `rules.py`) |
 | `app/chain/` | Shared workflow orchestrators (`subscribe/`, `download/`, `transfer/`, `search/`, `media/` same-named packages plus focused chains and `_recognition.py`, `_messaging.py`, `_interaction.py`, `_music.py` mixins) |
 | `app/modules/` | Pluggable downloaders, media servers, metadata/lyrics sources, indexers, notifications and `filemanager` storages (shared boilerplate templates live in `app/modules/_base/`) |
@@ -115,6 +115,12 @@ Entrypoints (app/api, app/command, app/monitor, app/scheduler, app/agent, app/wo
   `search/`, `media/`) keep class identity and event wrappers on `facade.py` and
   isolate queue, planning, execution, settlement and cache adapters in
   single-word owner modules, and retired single-file monoliths must not return.
+- Automatic subscription refresh policy and restartable time-slot facts belong
+  to `application/subscription/refresh.py`; `chain/subscribe/poll.py` owns the
+  finite set of in-flight site futures through real completion, and
+  `chain/torrents.py` owns per-site fetch/recognition and short cache merges.
+  Scheduler only wakes the injected refresh callable; it does not create a
+  separate business worker pool or own a second refresh queue.
 
 ### Module and Agent Layer
 
