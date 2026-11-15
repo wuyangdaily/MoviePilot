@@ -113,6 +113,16 @@ AppPush 的所有用户范围由 `tests/test_notification_routing_parity.py` 验
 
 ## 外部依赖：一律 mock，零真实网络
 
+季集选集由 `tests/test_episode_file_selection.py`、`tests/test_download_batch_phases.py` 和
+`tests/test_download_history_episode_mapping.py` 验证：S01E20 已识别为 S02E08 时，整包选中
+真实第 20 集，候选集数检查与历史文件明细采用相同对应关系。仅使用标题与识别结果中明确、
+等长的集号对应项，不根据季号猜测整包偏移；无对应依据时拒绝跨季同号文件，特别篇 S00
+独立匹配。来源识别词已经修正的文件不重复换算，无集号附件继续保留。
+选集失败只请求移除本次新增任务并保留文件，再由现有下载链记录退避、通知和尝试其它候选；
+下载器拒绝清理时明确提示人工核查。已有任务不启停、不重选也不删除。
+`tests/test_module_invocation_dispatcher.py` 同时验证旧插件下载器不接收新增可选的
+`episode_selection` 时继续兼容。这些测试使用离线下载器替身，不代表真实 Docker 实例验收。
+
 AniList 直接访问官方 GraphQL 接口，不再探测 `trace.moe/anilist/`。中文数据集保存在
 `<CONFIG_DIR>/cache/anilist/anilist-chinese.json`，有效期 24 小时，同步、异步查询和重建客户端
 共用快照；配置 `GITHUB_PROXY` 时先直连镜像，失败再按 `PROXY` 访问原始 GitHub 地址。
@@ -236,6 +246,10 @@ with patch.object(SomeModule, "fetch", new=AsyncMock(return_value=FAKE)):
 或写入洗版优先级。测试覆盖显式缺集列表、后页整包、不完整包和搜索期间进度变化，均隔离外部服务。
 完整覆盖目标来自订阅起止集；整包含范围外剧集时只选目标集提交，例如只订阅第 5 集时整季包也只下载
 第 5 集，种子集数与目标一致时仍整包提交。下载层用例见 `tests/test_download_batch_phases.py`。
+整包未通过优先级门槛而回退普通下载时，按订阅范围拆包。`tests/test_subscribe_missing_scope.py`
+覆盖媒体库无此剧和只有其他季两种情况，并验证单集、累计编号和断号资源只提交范围内可用的集。
+断号缺失集继续等待补集。早于季首的历史集数设置保留原缺集语义，历史负数按未设置处理。
+`tests/test_download_batch_phases.py` 验证下载一季后，其他季的显式缺集仍可在本轮提交。
 
 整包优先也约束候选分批：已收集的整包即使排序低于分集、检查点恢复后缺少临时下载地址，
 也须先恢复地址并共同进入下载选择；多个整包不完整、下载失败或恢复后已不可用时才回退分集。

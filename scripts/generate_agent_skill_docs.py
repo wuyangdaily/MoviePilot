@@ -18,8 +18,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # 与对应 SKILL.md 同步维护，重新生成不能回退用户同步所需的版本。
-MOVIEPILOT_API_SKILL_VERSION = "73"
-DATABASE_OPERATION_SKILL_VERSION = "18"
+MOVIEPILOT_API_SKILL_VERSION = "74"
+DATABASE_OPERATION_SKILL_VERSION = "19"
 
 
 DATABASE_TABLE_GUIDES: dict[str, tuple[str, str, str]] = {
@@ -189,7 +189,8 @@ DATABASE_TABLE_GUIDES: dict[str, tuple[str, str, str]] = {
         "identity and actor_name is a bounded display snapshot. Old rows have unknown origin.",
     ),
     "transferpending": (
-        "Durably stores pending transfer input, plans, checkpoints, leases, retries, and manual review state.",
+        "Durably stores pending transfer input, plans, checkpoints, leases, retries, manual review state, "
+        "and one short-lived pending manual identity authorization.",
         "Diagnosing restart recovery, expired leases, retry_wait, terminal failures, or manual review.",
         "Core durable state machine advanced only by planning, execution, retry, and review services.",
     ),
@@ -305,6 +306,13 @@ _MEDIA_TYPE_FIELD_VALUES: dict[tuple[str, str, str], str] = {
 # OpenAPI 无法表达的操作级 Agent 指引，在生成时追加到操作参数组之后，
 # 保证运行中的 Skill 包含这些指引，无需手动修改生成的 api/*.md。
 _OPERATION_NOTES: dict[str, list[str]] = {
+    "transfer.history.replan": [
+        "- `path_params.history_id` 使用本次失败历史 ID，`body.task_id` 和 `body.settlement_revision` "
+        "原样保留接管上下文中的任务与结算版本。",
+        "- `body.media_source`、`body.media_id`、`body.media_type` 必须来自同一次核实的媒体身份。"
+        "重新规划会清空旧识别结果，再按该身份直接查询，预览与提交使用同一身份及季集。",
+        "- 受理后通过 `transfer.history` 核实整理结果，受理或排队仅表示任务等待执行。",
+    ],
     "transfer.history.register": [
         "- **Completed external work only:** Register a completed copy, native local hard link, or move; "
         "this operation only writes history and never moves files, scrapes metadata, or changes downloads.",
