@@ -150,6 +150,18 @@ Entrypoints (app/api, app/command, app/monitor, app/scheduler, app/agent, app/wo
   (`app.agent.llm.LLMHelper`, `app.helper.llm`) resolve through exact
   `SYMBOL_ALIASES`. Models created by `LLMHelper.get_llm()` own dedicated HTTP
   clients closed via `LLMHelper.close_llm()`.
+- `app/agent/evidence/` owns per-turn in-memory knowledge and request projection.
+  Tools publish a safe receipt before logging; only the main model receives the
+  temporary content. Summarization inputs and state commands redact it at their
+  producer boundary, while history and recovery remove local references.
+  Evidence never grants tool authority or becomes a cross-turn result cache.
+- `app/application/knowledge.py` owns the locally switchable read-only knowledge use
+  case and technical Port. `app/adapters/external/knowledge.py` implements the
+  protocol through the host HTTP layer; shared configuration and response DTOs
+  live in `app/schemas/knowledge.py`. The public read-only endpoint uses the
+  existing `MP_SERVER_HOST` connection and carries no per-install access token.
+  Knowledge tools are controlled by `AI_AGENT_KNOWLEDGE_ENABLE` and response
+  bodies are not cached by this capability.
 
 ### DB, Repository, Outbox and Durable Transfer Layer
 
