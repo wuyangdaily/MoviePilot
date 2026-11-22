@@ -5687,8 +5687,10 @@
       "family": "downloader",
       "input_contract": "DownloadTaskRequest",
       "optional_parameters": [
+        "confirmed_selection",
         "custom_words",
-        "episode_selection"
+        "episode_selection",
+        "user_specified"
       ],
       "plugin_short_circuit": true,
       "public_to_plugins": true,
@@ -10415,6 +10417,41 @@
   "sdk_exports": {
     "app.sdk": [],
     "app.sdk.browser": [
+      {
+        "kind": "import",
+        "name": "BrowserOperationTimeoutError",
+        "target": "app.runtime.browser.BrowserOperationTimeoutError"
+      },
+      {
+        "kind": "import",
+        "name": "BrowserQueueCancelledError",
+        "target": "app.runtime.browser.BrowserQueueCancelledError"
+      },
+      {
+        "kind": "import",
+        "name": "BrowserQueueStatus",
+        "target": "app.runtime.browser.BrowserQueueStatus"
+      },
+      {
+        "kind": "FunctionDef",
+        "name": "browser_context",
+        "target": ""
+      },
+      {
+        "kind": "AsyncFunctionDef",
+        "name": "browser_context_async",
+        "target": ""
+      },
+      {
+        "kind": "import",
+        "name": "browser_request",
+        "target": "app.runtime.browser.browser_request"
+      },
+      {
+        "kind": "import",
+        "name": "get_browser_queue_status",
+        "target": "app.runtime.browser.get_browser_queue_status"
+      },
       {
         "kind": "FunctionDef",
         "name": "launch_browser_context",
